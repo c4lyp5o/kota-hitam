@@ -1,3 +1,5 @@
+<!doctype html>
+<meta charset="utf-8">
 <title>Kota Hitam</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -357,8 +359,17 @@ body.pov #hud, body.pov #goals, body.pov #log, body.pov #dock, body.pov #file{di
 
 <section id="paper" class="overlay" hidden></section>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.module.js"}}</script>
+<script type="module">
+import * as THREE from 'three';
+// Colours and the noir grade were tuned in gamma space, without colour management.
+THREE.ColorManagement.enabled = false;
+// Three dropped its legacy lights in r155. Light values here are in the old units, so scale them by pi
+// and restore the old point light falloff: the physical 1/d^decay burns out roofs right beside a lamp.
+const LIGHT_K = Math.PI;
+THREE.ShaderChunk.lights_pars_begin = THREE.ShaderChunk.lights_pars_begin.replace(
+  'float distanceFalloff = 1.0 / max( pow( lightDistance, decayExponent ), 0.01 );',
+  'return pow( saturate( 1.0 - lightDistance / cutoffDistance ), decayExponent ); float distanceFalloff = 1.0;');
 (() => {
 'use strict';
 /* =========================================================================
@@ -1437,8 +1448,8 @@ function initGL(){
   G.camera = new THREE.OrthographicCamera(-10,10,10,-10,1,500);
   G.target = new THREE.Vector3(0,0,0); G.offset = new THREE.Vector3(1,1.05,1).normalize().multiplyScalar(140); G.zoom = 1;
 
-  const gd = new Uint8Array([70,70,70, 135,135,135, 200,200,200, 255,255,255]);
-  G.grad = new THREE.DataTexture(gd, 4, 1, THREE.RGBFormat); G.grad.minFilter = G.grad.magFilter = THREE.NearestFilter; G.grad.needsUpdate = true;
+  const gd = new Uint8Array([70,70,70,255, 135,135,135,255, 200,200,200,255, 255,255,255,255]);
+  G.grad = new THREE.DataTexture(gd, 4, 1, THREE.RGBAFormat); G.grad.minFilter = G.grad.magFilter = THREE.NearestFilter; G.grad.needsUpdate = true;
   G.inkMat = new THREE.MeshBasicMaterial({ color:0x000000, side:THREE.BackSide });
 
   G.hemi = new THREE.HemisphereLight(0xb8c6e0, 0x2a2622, .5); scene.add(G.hemi);
@@ -2070,8 +2081,8 @@ function makeFire(){
 
 /* ---------- post: noir grade (or colour), bloom, grain ---------- */
 function initPost(){
-  const R = G.renderer, gl2 = R.capabilities.isWebGL2;
-  const hdr = gl2 && R.extensions.has('EXT_color_buffer_float');
+  const R = G.renderer;
+  const hdr = R.extensions.has('EXT_color_buffer_float');
   const opts = { minFilter:THREE.LinearFilter, magFilter:THREE.LinearFilter, format:THREE.RGBAFormat, type: hdr ? THREE.HalfFloatType : THREE.UnsignedByteType };
   G.rtScene = new THREE.WebGLRenderTarget(4,4,opts);
   G.rtA = new THREE.WebGLRenderTarget(4,4,opts); G.rtB = new THREE.WebGLRenderTarget(4,4,opts);
@@ -2199,10 +2210,10 @@ function syncScene(time, dt, hourF){
   const h = hourF % 24, ph = phaseOf(Math.floor(h));
   const night = (ph === 'night') ? 1 : (ph === 'dusk') ? .75 : (ph === 'morning') ? .45 : .15;
   const bright = LOOK.colour ? 1.35 : 1;
-  G.hemi.intensity = (.22 + (1-night)*.55) * bright; G.sun.intensity = (.25 + (1-night)*.75) * bright;
+  G.hemi.intensity = (.22 + (1-night)*.55) * bright * LIGHT_K; G.sun.intensity = (.25 + (1-night)*.75) * bright * LIGHT_K;
   G.sun.color.setHex(night > .6 ? 0x8d9bc0 : 0xfff0d8);
   const sky = night > .6 ? 0x07080b : 0x23262c; G.renderer.setClearColor(sky); G.scene.fog.color.setHex(sky);
-  G.lamps.forEach(l => { l.L.intensity = night*.9; l.glow.material.opacity = .55*night; l.pool.material.opacity = .4*night; });
+  G.lamps.forEach(l => { l.L.intensity = night*.9*LIGHT_K; l.glow.material.opacity = .55*night; l.pool.material.opacity = .4*night; });
 
   G.lots.forEach((V, i) => {
     const l = S.lots[i];
@@ -2261,7 +2272,7 @@ function syncScene(time, dt, hourF){
 
   if (S.policeLot >= 0){
     const V = G.lots[S.policeLot]; G.police.visible = true; G.police.position.set(V.x, .2, V.z + (V.z > 0 ? -3.4 : 3.4)); G.police.rotation.y = 0;
-    const blink = Math.floor(time*3.4) % 2; G.pLight.color.setHex(blink ? 0xff1020 : 0x2040ff); G.pLight.intensity = 3.2;
+    const blink = Math.floor(time*3.4) % 2; G.pLight.color.setHex(blink ? 0xff1020 : 0x2040ff); G.pLight.intensity = 3.2*LIGHT_K;
     G.pRed.color.setHex(blink ? 0xff2030 : 0x300000); G.pBlue.color.setHex(blink ? 0x000830 : 0x3060ff);
   } else { G.police.visible = false; G.pLight.intensity = 0; }
 
@@ -2277,13 +2288,13 @@ function syncScene(time, dt, hourF){
       G.smoke.pos[k*3+1] += dt*2.2; G.smoke.pos[k*3] -= dt*.8;
     }
     G.fireMesh.geometry.attributes.position.needsUpdate = true; G.smokeMesh.geometry.attributes.position.needsUpdate = true;
-    G.fireLight.position.set(V.x, 2.5, V.z + 2); G.fireLight.intensity = 3 + Math.sin(time*17)*.8 + Math.sin(time*7)*.6;
+    G.fireLight.position.set(V.x, 2.5, V.z + 2); G.fireLight.intensity = (3 + Math.sin(time*17)*.8 + Math.sin(time*7)*.6) * LIGHT_K;
   } else { G.fireMesh.visible = G.smokeMesh.visible = false; G.fireLight.intensity = 0; }
 
   if (night > .5 && time > (G.nextBolt || 8)){ G.flash = 1; G.nextBolt = time + rnd(18, 45); sfx.thunder(rnd(.6,2.2), rnd(.6,1)); }
   G.flash = Math.max(0, (G.flash||0) - dt*2.6);
   const strobe = G.flash > .6 ? G.flash : G.flash * (Math.sin(time*60) > 0 ? 1 : .2);
-  G.sun.intensity += strobe*2.2;
+  G.sun.intensity += strobe*2.2*LIGHT_K;
   G.mComp.uniforms.flash.value = strobe*.22;
   G.mComp.uniforms.raid.value = S.policeLot >= 0 ? 1 : 0;
   G.mComp.uniforms.time.value = time;

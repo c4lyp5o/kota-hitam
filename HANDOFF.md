@@ -4,7 +4,7 @@
 
 ## Where things stand
 
-The single-file prototype (`index.html`) plays the whole of Act I: a prologue cutscene, the Chow Kit economy, the Geng Lorong rival, heat and raids, expansion into 12 neighbourhoods, the end-of-Act-I and fall endings, a weekly newspaper, bystander POV with generated NPCs, and a recording booth for voice-overs. The design is written up in `docs/DESIGN.md`.
+The single-file prototype (`index.html`) plays the whole of Act I: a prologue cutscene, the Chow Kit economy, the Geng Lorong rival, heat and raids, expansion into 12 neighbourhoods, the end-of-Act-I and fall endings, a weekly newspaper, bystander POV with generated NPCs, fog of war over the city, and a recording booth for voice-overs. It runs on Three.js r187, and the owner has checked the 3D view on a real GPU. The design is written up in `docs/DESIGN.md`.
 
 The original design doc lives in claude.ai as a shared doc and is the source of truth for design discussion; `docs/DESIGN.md` is a condensed copy of it for this repo.
 
@@ -23,28 +23,28 @@ The original design doc lives in claude.ai as a shared doc and is the source of 
 | Home turf | Every player has a private home district that earns as much as the shared city |
 | Syndicates | Brand spans realms; turf, treasury and cash stay in each realm's chapter |
 | Moving realm | Only at season end, for a fee |
+| Fog of war | Only unlocked blocks and one layer beyond them are visible. Derived from `S.blocks`, so it isn't saved; off in bystander POV |
 | Content | Massage parlour is abstract and off-screen; trafficking is only a story beat (tip off the police or not); no real-money gambling |
 
 ## Known issues and untested areas
 
-- **The 3D view has never been checked on a real GPU by the person who wrote it.** All headless testing ran without WebGL. The economy, UI, NPC profiles, thoughts, expansion, money changer and voice-over import were tested; the jointed NPC bodies, toon buildings, POV camera and post-processing were written blind. Expect visual bugs (scales, outline thickness, clipping, sign orientation).
-- **Performance is unmeasured.** 64 plots with ink outlines plus 22 NPCs of about 20 meshes each is likely 2,000+ draw calls. Merging static geometry and instancing are the first fixes if frame rate suffers.
-- **Three.js r128 is old** (pinned for the single-file CDN build). Upgrading means replacing `THREE.RGBFormat` in the toon gradient and checking `WebGLRenderTarget` options.
-- **Balance is rough.** Numbers in `BIZ`, raid odds, rival move timing and expansion costs were set by hand and checked only in quick simulated runs.
+- **Frame rate:** on the owner's GPU it went from 45 to 60 fps once `bake()` merged plot buildings, plot bases and the backdrop by material, taking draw calls from about 1,750 to 1,190 per frame (counted under software WebGL). Frame rate with fog of war on hasn't been measured. About half of the remaining calls are NPCs (27 each), which rigged characters should fix (task 5).
+- **Fog of war checks:** the visibility rule is in the smoke test and the fog has been rendered under software WebGL. Real clicks on fogged blocks and turning fog off in POV haven't been tested.
+- **Lightning is very bright.** A bolt blows most of the visible city out to white for a moment. It's existing behaviour and may be worth softening.
+- **Three.js is r187,** pinned in the import map and loaded as an ES module from jsDelivr. Colour management is off and the legacy point light falloff is patched into `ShaderChunk` at the top of the game script, so recheck that patch on any upgrade: it replaces an exact line and silently does nothing if the line changes.- **Balance is rough.** Numbers in `BIZ`, raid odds, rival move timing and expansion costs were set by hand and checked only in quick simulated runs.
 - **Voice-over recordings are stored per browser** (IndexedDB) in the prototype. In the real project they should ship from `assets/vo/`.
 - The `window.__kh` debug hook is exposed for tests; remove or guard it before any public release.
 
 ## Next tasks, in order
 
-1. **Look at the prototype in a browser** and fix whatever the blind-written 3D got wrong. Take screenshots of the city, a bystander's POV and the cutscenes.
-2. **Set up the project:** Vite + TypeScript, Three.js from npm (current version), ESLint and Prettier, GitHub Actions running the smoke test.
-3. **Split `index.html` into modules:** `sim/` (no rendering imports), `render/`, `npc/`, `pov/`, `audio/`, `vo/`, `cutscenes/`, `ui/`. Keep behaviour identical; the smoke test is the guard rail.
-4. **Make the simulation deterministic and serialisable:** seeded RNG passed in (not `Math.random`), a pure `tick(state, hours)` and `apply(state, action)`. This is what the multiplayer server will run.
-5. **Load voice-overs from `assets/vo/`** using the manifest the recording booth exports, falling back to the booth's browser storage during development.
-6. **Swap procedural NPC bodies for rigged GLTF characters,** keeping `createNPC`'s profile data and API.
-7. **Sandbox mode:** a setup screen for rival aggression, starting cash and which neighbourhoods are open.
-8. **Act II** (Bukit Bintang and Petaling Street) and the remaining clans from the design.
-9. **Multiplayer groundwork:** accounts and cloud saves first, then a shared asynchronous realm. Nakama is the recommended backend; see `docs/DESIGN.md`.
+1. **Set up the project:** Vite + TypeScript, Three.js from npm in place of the import map, ESLint and Prettier, GitHub Actions running the smoke test.
+2. **Split `index.html` into modules:** `sim/` (no rendering imports), `render/`, `npc/`, `pov/`, `audio/`, `vo/`, `cutscenes/`, `ui/`. Keep behaviour identical; the smoke test is the guard rail.
+3. **Make the simulation deterministic and serialisable:** seeded RNG passed in (not `Math.random`), a pure `tick(state, hours)` and `apply(state, action)`. This is what the multiplayer server will run.
+4. **Load voice-overs from `assets/vo/`** using the manifest the recording booth exports, falling back to the booth's browser storage during development.
+5. **Swap procedural NPC bodies for rigged GLTF characters,** keeping `createNPC`'s profile data and API.
+6. **Sandbox mode:** a setup screen for rival aggression, starting cash and which neighbourhoods are open.
+7. **Act II** (Bukit Bintang and Petaling Street) and the remaining clans from the design.
+8. **Multiplayer groundwork:** accounts and cloud saves first, then a shared asynchronous realm. Nakama is the recommended backend; see `docs/DESIGN.md`.
 
 ## Useful entry points in `index.html`
 

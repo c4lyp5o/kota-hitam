@@ -29,6 +29,7 @@ A real-time-with-pause racket tycoon in a rain-soaked, noir Kuala Lumpur. You st
 - Kerb colours show ownership: red for you, teal for Geng Lorong, grey for sale.
 - 12 neighbourhoods surround it, 4 plots each: Sentul, Titiwangsa, Jalan Pahang, Kampung Baru North, Jalan Ipoh, Kampung Baru, Jalan TAR, Jalan Raja Muda, Masjid India, Dang Wangi, Jalan Ampang, Bukit Bintang.
 - **Expansion** *(prototype)*: only blocks touching your turf; the first costs RM 6,000 clean and respect 15, each further one +RM 3,000 and +5 respect. Paying clears the old buildings into 4 plots for sale; the rival can buy in too.
+- **Fog of war** *(prototype)*: you see only unlocked blocks and one layer past them, using the same adjacency rule as expansion, so the 4 corner blocks start hidden. Fogged blocks can't be clicked. Scenery outside the grid clears the same way, with diagonals counting, so taking Sentul reveals the clock tower. Fog is off in bystander POV.
 - **Act I win** *(prototype)*: own 10 lots.
 
 ## Time and money

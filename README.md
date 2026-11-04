@@ -8,7 +8,7 @@ This repository holds the playable prototype (Act I) and the design notes for th
 
 ## Play the prototype
 
-The whole prototype is one file, `index.html`. It loads Three.js r128 and Google Fonts from CDNs, so it needs an internet connection.
+The whole prototype is one file, `index.html`. It loads Three.js r187 and Google Fonts from CDNs, so it needs an internet connection.
 
 ```sh
 # any static file server works; opening the file directly also works in most browsers
@@ -21,7 +21,7 @@ Then open `http://localhost:8000` (or the port `serve` prints). Desktop browsers
 
 ## What's in the prototype
 
-- **Chow Kit, 1987:** 16 plots on a rainy street grid, with 12 neighbourhoods to expand into (Kampung Baru, Titiwangsa, Sentul, Jalan TAR, Masjid India, Dang Wangi, Bukit Bintang and more).
+- **Chow Kit, 1987:** 16 plots on a rainy street grid, with 12 neighbourhoods to expand into (Kampung Baru, Titiwangsa, Sentul, Jalan TAR, Masjid India, Dang Wangi, Bukit Bintang and more). Fog of war hides everything more than one block past your turf.
 - **13 businesses:** street rackets, back rooms, big-money operations and laundering fronts, each with staff, prices, tills and heat.
 - **Dirty and clean cash:** rackets earn dirty money; fronts and the Masjid India money changer wash it into clean money for property and expansion.
 - **Geng Lorong:** an AI rival that buys land, undercuts, poaches, sabotages and torches. You can strong-arm, torch or buy them out in return.

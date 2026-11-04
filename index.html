@@ -430,6 +430,7 @@ const LOT_COUNT = 16 + BLOCKS.length*4;
 function blockOf(i){ return i < 16 ? -1 : Math.floor((i-16)/4); }
 function unlockedCenters(){ return CORE_BLOCKS.concat((S.blocks||[]).map(b => BLOCKS[b].c)); }
 function blockAdjacent(b){ const [x,z] = BLOCKS[b].c; return unlockedCenters().some(([ux,uz]) => Math.abs(ux-x) + Math.abs(uz-z) === 14); }
+function blockVisible(b){ return (S.blocks||[]).includes(b) || blockAdjacent(b); }
 function expandCost(){ return Math.round((6000 + 3000*(S.blocks||[]).length) * (S.discount || 1) / 100)*100; }
 function expandRespect(){ return 15 + 5*(S.blocks||[]).length; }
 function lotAddress(i){
@@ -1499,17 +1500,17 @@ function initGL(){
   G.hutMats = PASTEL.map(c => new THREE.MeshToonMaterial({ color:c, gradientMap:G.grad, map:G.facadeTex, emissive:0xffffff, emissiveMap:G.facadeLit, emissiveIntensity:.8 }));
   G.lots = []; for (let i=0;i<LOT_COUNT;i++) G.lots.push(makePlot(i, rand));
   G.markers = BLOCKS.map(B => { const m = new THREE.Sprite(new THREE.SpriteMaterial({ map:G.plusTex, depthTest:false, transparent:true })); m.scale.set(2.4,2.4,1); m.position.set(B.c[0], 9, B.c[1]); m.renderOrder = 11; m.visible = false; scene.add(m); return m; });
-  const preBackdrop = scene.children.length; makeBackdrop(rand); bake(scene, preBackdrop);
+  const preBackdrop = scene.children.length; makeBackdrop(rand); bake(scene, preBackdrop); G.towers.forEach(t => scene.add(t.g));
 
   // backdrop windows, instanced
   const im = new THREE.InstancedMesh(new THREE.PlaneGeometry(.42,.55), new THREE.MeshBasicMaterial({ color:0xffffff }), Math.max(1, G.winPositions.length));
   const col = new THREE.Color();
   G.winPositions.forEach((w,k) => {
-    q.setFromAxisAngle(new THREE.Vector3(0,1,0), w.ry); m4.compose(new THREE.Vector3(w.x,w.y,w.z), q, one); im.setMatrixAt(k, m4);
+    q.setFromAxisAngle(new THREE.Vector3(0,1,0), w.ry); m4.compose(new THREE.Vector3(w.x,w.y,w.z), q, one); im.setMatrixAt(k, m4); w.m = m4.clone();
     if (rand() < w.p){ const b = .45 + rand()*.6; col.setRGB(1*b, .84*b, .58*b); } else col.setRGB(.05,.055,.065);
     im.setColorAt(k, col);
   });
-  im.frustumCulled = false; scene.add(im);
+  im.frustumCulled = false; scene.add(im); G.winMesh = im;
 
   // street lamps at the crossroads
   G.lamps = [];
@@ -1666,11 +1667,11 @@ function buildPlot(V, l){
 }
 
 function makeBackdrop(rand){
-  const hut = (x, z, w, d, h, roof) => {
+  const hut = (parent, x, z, w, d, h, roof) => {
     const c = PASTEL[Math.floor(rand()*PASTEL.length)];
-    box(G.scene, w, h, d, c, x, h/2 + .2, z, .06);
-    if (roof){ const m = part(G.scene, roofGeo(w + .3, d + .3, .9), toon(0x8f4a35), x, h + .2 + .45, z, .05); m.rotation.y = Math.PI/2; }
-    else box(G.scene, w + .14, .2, d + .14, 0x4f4b46, x, h + .3, z, .03);
+    box(parent, w, h, d, c, x, h/2 + .2, z, .06);
+    if (roof){ const m = part(parent, roofGeo(w + .3, d + .3, .9), toon(0x8f4a35), x, h + .2 + .45, z, .05); m.rotation.y = Math.PI/2; }
+    else box(parent, w + .14, .2, d + .14, 0x4f4b46, x, h + .3, z, .03);
     for (let y = 1.4; y < h - .3; y += 1.3){
       for (let wx = -w/2 + .6; wx < w/2 - .3; wx += 1.1) G.winPositions.push({ x:x+wx, y:y+.2, z:z+d/2+.03, ry:0, p:.35 });
       for (let wz = -d/2 + .6; wz < d/2 - .3; wz += 1.2) G.winPositions.push({ x:x+w/2+.03, y:y+.2, z:z+wz, ry:Math.PI/2, p:.25 });
@@ -1682,7 +1683,14 @@ function makeBackdrop(rand){
     box(G.scene, 10.2, .2, 10.2, 0x5f5c56, cx, .1, cz, .03);
   }
   // far towers fade into the rain
-  for (let k=0;k<12;k++){ const a = rand()*Math.PI*2; const r = 40 + rand()*14; hut(Math.cos(a)*r - 8, Math.sin(a)*r - 8, 5, 5, 8 + rand()*16, false); }
+  // kept apart from the baked backdrop: a fogged tower must stop drawing, or it blocks the map in front of it
+  G.towers = [];
+  for (let k=0;k<12;k++){
+    const a = rand()*Math.PI*2, r = 40 + rand()*14, x = Math.cos(a)*r - 8, z = Math.sin(a)*r - 8, g = new THREE.Group(), n = G.winPositions.length;
+    hut(g, x, z, 5, 5, 8 + rand()*16, false); bake(g);
+    for (let j=n;j<G.winPositions.length;j++) G.winPositions[j].t = k;
+    G.towers.push({ g, cell: Math.min(7, Math.max(0, Math.floor((z+56)/14)))*8 + Math.min(7, Math.max(0, Math.floor((x+56)/14))), open:null });
+  }
   // Sultan Abdul Samad clock tower, down the road
   const tx = -36, tz = -34;
   box(G.scene, 12, 3.2, 4, 0xb4573a, tx, 1.8, tz, .08);
@@ -2107,6 +2115,11 @@ function initPost(){
   const hdr = R.extensions.has('EXT_color_buffer_float');
   const opts = { minFilter:THREE.LinearFilter, magFilter:THREE.LinearFilter, format:THREE.RGBAFormat, type: hdr ? THREE.HalfFloatType : THREE.UnsignedByteType };
   G.rtScene = new THREE.WebGLRenderTarget(4,4,opts);
+  G.rtScene.depthTexture = new THREE.DepthTexture(4,4);
+  // Fog of war mask: 8x8 cells of 14 units, centred on the block grid. The outer ring stays fogged forever.
+  G.fog = { cur:new Float32Array(64), data:new Uint8Array(256), primed:false };
+  G.fog.tex = new THREE.DataTexture(G.fog.data, 8, 8, THREE.RGBAFormat);
+  G.fog.tex.minFilter = G.fog.tex.magFilter = THREE.LinearFilter; G.fog.tex.needsUpdate = true;
   G.rtA = new THREE.WebGLRenderTarget(4,4,opts); G.rtB = new THREE.WebGLRenderTarget(4,4,opts);
   const vs = 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }';
   G.mBright = new THREE.ShaderMaterial({ uniforms:{ t:{value:null} }, vertexShader:vs, depthTest:false, depthWrite:false,
@@ -2117,10 +2130,22 @@ function initPost(){
         s += texture2D(t,vUv+dir*1.3846).rgb*0.316216; s += texture2D(t,vUv-dir*1.3846).rgb*0.316216;
         s += texture2D(t,vUv+dir*3.2308).rgb*0.070270; s += texture2D(t,vUv-dir*3.2308).rgb*0.070270;
         gl_FragColor = vec4(s,1.0); }` });
-  G.mComp = new THREE.ShaderMaterial({ uniforms:{ tS:{value:null}, tB:{value:null}, time:{value:0}, flash:{value:0}, raid:{value:0}, res:{value:new THREE.Vector2(1,1)}, mode:{value:0} },
+  G.mComp = new THREE.ShaderMaterial({ uniforms:{ tS:{value:null}, tB:{value:null}, time:{value:0}, flash:{value:0}, raid:{value:0}, res:{value:new THREE.Vector2(1,1)}, mode:{value:0},
+      tD:{value:G.rtScene.depthTexture}, tFog:{value:G.fog.tex}, invVP:{value:new THREE.Matrix4()}, fogOn:{value:1} },
     vertexShader:vs, depthTest:false, depthWrite:false,
-    fragmentShader:`uniform sampler2D tS, tB; uniform float time, flash, raid, mode; uniform vec2 res; varying vec2 vUv;
+    fragmentShader:`uniform sampler2D tS, tB, tD, tFog; uniform float time, flash, raid, mode, fogOn; uniform vec2 res; uniform mat4 invVP; varying vec2 vUv;
       float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233))) * 43758.5453); }
+      float vnoise(vec2 p){ vec2 i = floor(p), f = fract(p), u = f*f*(3.0-2.0*f);
+        return mix(mix(hash(i), hash(i+vec2(1.0,0.0)), u.x), mix(hash(i+vec2(0.0,1.0)), hash(i+vec2(1.0,1.0)), u.x), u.y); }
+      vec3 fogOver(vec3 col, vec2 uv){
+        float z = texture2D(tD, uv).r;
+        vec4 w = invVP * vec4(uv*2.0-1.0, z*2.0-1.0, 1.0);
+        vec2 xz = w.xz / w.w;
+        float n = (vnoise(xz*0.18 + time*vec2(0.05,0.03)) + 0.5*vnoise(xz*0.41 - time*vec2(0.04,0.02))) / 1.5;
+        float open = texture2D(tFog, (xz + (n-0.5)*1.8 + 56.0) / 112.0).r;
+        float f = z >= 0.9999 ? 1.0 : 1.0 - smoothstep(0.32, 0.68, open);
+        return mix(col, mix(vec3(0.02,0.022,0.03), vec3(0.17,0.18,0.2), n*n), f*0.98);
+      }
       void main(){
         vec2 uv = vUv, d = uv - 0.5; float r2 = dot(d,d);
         vec2 ab = d * 0.005 * r2 * 4.0 * (1.0 - mode);
@@ -2138,6 +2163,7 @@ function initPost(){
         col = clamp(col, 0.0, 1.0);
         col = mix(col, col*col*(3.0-2.0*col), mix(0.6, 0.25, mode));
         col = pow(max(col, 0.0), vec3(mix(1.12, 0.95, mode)));
+        if (fogOn > 0.5) col = fogOver(col, uv);
         col += flash * vec3(0.8, 0.86, 1.0) * (1.0 - r2*1.5);
         vec3 siren = mix(vec3(1.0,0.05,0.08), vec3(0.08,0.2,1.0), step(0.5, fract(time*1.7)));
         col += raid * siren * 0.10 * (0.6 + r2*2.0);
@@ -2149,6 +2175,26 @@ function initPost(){
   G.quad = new THREE.Mesh(new THREE.PlaneGeometry(2,2), G.mComp); G.quad.frustumCulled = false;
   G.qScene = new THREE.Scene(); G.qScene.add(G.quad); G.qCam = new THREE.Camera();
 }
+// Inside the block grid a cell shows if it's unlocked or next to an unlocked block, the same rule as blockAdjacent.
+// Scenery outside the grid can't be bought, so diagonals count: Sentul reveals the clock tower.
+function fogCellOpen(x, z){
+  const inGrid = Math.abs(x) < 28 && Math.abs(z) < 28;
+  return unlockedCenters().some(([ux,uz]) => { const dx = Math.abs(ux-x), dz = Math.abs(uz-z); return inGrid ? dx + dz <= 14 : Math.max(dx,dz) <= 14; });
+}
+function fogTick(dt){
+  const F = G.fog, k = F.primed ? Math.min(1, dt*1.4) : 1; let dirty = false;
+  for (let iz=0;iz<8;iz++) for (let ix=0;ix<8;ix++){
+    const c = iz*8 + ix, goal = fogCellOpen(ix*14 - 49, iz*14 - 49) ? 1 : 0;
+    if (F.cur[c] === goal) continue;
+    F.cur[c] = Math.abs(goal - F.cur[c]) < .004 ? goal : F.cur[c] + (goal - F.cur[c])*k;
+    F.data[c*4] = F.data[c*4+1] = F.data[c*4+2] = Math.round(F.cur[c]*255); F.data[c*4+3] = 255; dirty = true;
+  }
+  F.primed = true; if (dirty) F.tex.needsUpdate = true;
+  let flipped = false;
+  G.towers.forEach(t => { const open = !!G.pov || F.cur[t.cell] > 0; if (open !== t.open){ t.open = t.g.visible = open; flipped = true; } });
+  if (flipped){ const none = new THREE.Matrix4().makeScale(0,0,0); G.winPositions.forEach((w,k) => G.winMesh.setMatrixAt(k, G.towers[w.t].open ? w.m : none)); G.winMesh.instanceMatrix.needsUpdate = true; }
+}
+function fogClearAt(p){ const ix = Math.floor((p.x+56)/14), iz = Math.floor((p.z+56)/14); return ix >= 0 && ix < 8 && iz >= 0 && iz < 8 && G.fog.cur[iz*8+ix] > .5; }
 function pass(mat, target){ G.quad.material = mat; G.renderer.setRenderTarget(target); G.renderer.render(G.qScene, G.qCam); }
 
 function resize(){
@@ -2173,8 +2219,8 @@ function initInput(){
   G.persp = new THREE.PerspectiveCamera(64, G.aspect || 1, .05, 220);
   let down = null, moved = false;
   const cast = (cx, cy) => { ndc.set(cx/innerWidth*2-1, -(cy/innerHeight)*2+1); ray.setFromCamera(ndc, G.pov ? G.persp : G.camera); };
-  const pickLot = () => { const hit = ray.intersectObjects(G.lots.map(l => l.pick), false)[0]; return hit ? hit.object.userData.lot : -1; };
-  const pickWalker = () => { const hit = ray.intersectObjects(G.walkers.filter(w => !G.pov || w !== G.pov.w).map(w => w.pick), false)[0]; return hit ? hit.object.userData.walker : null; };
+  const pickLot = () => { const hit = ray.intersectObjects(G.lots.filter(l => l.root.visible).map(l => l.pick), false)[0]; return hit ? hit.object.userData.lot : -1; };
+  const pickWalker = () => { const hit = ray.intersectObjects(G.walkers.filter(w => G.pov ? w !== G.pov.w : fogClearAt(w.g.position)).map(w => w.pick), false)[0]; return hit ? hit.object.userData.walker : null; };
   cv.addEventListener('pointerdown', e => { down = { x:e.clientX, y:e.clientY, tx:G.target.x, tz:G.target.z, look:G.pov ? G.pov.look : 0, pitch:G.pov ? G.pov.pitch : 0 }; moved = false; try{ cv.setPointerCapture(e.pointerId); }catch(err){} });
   cv.addEventListener('pointermove', e => {
     if (down){
@@ -2239,6 +2285,7 @@ function syncScene(time, dt, hourF){
 
   G.lots.forEach((V, i) => {
     const l = S.lots[i];
+    V.root.visible = !!G.pov || i < 16 || blockVisible(blockOf(i));
     const type = l.biz ? l.biz.type : null;
     const key = `${type}|${l.burned}|${l.owner}|${l.biz ? l.biz.tier : 0}`;
     if (V.cur !== key){ const first = V.cur === undefined; V.cur = key; buildPlot(V, l); bake(V.bld); V.pop = first ? 1 : 0; }
@@ -2321,6 +2368,7 @@ function syncScene(time, dt, hourF){
   G.mComp.uniforms.flash.value = strobe*.22;
   G.mComp.uniforms.raid.value = S.policeLot >= 0 ? 1 : 0;
   G.mComp.uniforms.time.value = time;
+  fogTick(dt);
   G.mComp.uniforms.mode.value += ((LOOK.colour ? 1 : 0) - G.mComp.uniforms.mode.value) * Math.min(1, dt*4);
 }
 /* ---------- bystander POV & inner voice ---------- */
@@ -2538,6 +2586,9 @@ function renderFrame(){
     G.mBlur.uniforms.t.value = G.rtA.texture; G.mBlur.uniforms.dir.value.set(k*1.6/w, 0); pass(G.mBlur, G.rtB);
     G.mBlur.uniforms.t.value = G.rtB.texture; G.mBlur.uniforms.dir.value.set(0, k*1.6/h); pass(G.mBlur, G.rtA);
   }
+  const viewCam = G.pov ? G.persp : G.camera;
+  G.mComp.uniforms.invVP.value.multiplyMatrices(viewCam.matrixWorld, viewCam.projectionMatrixInverse);
+  G.mComp.uniforms.fogOn.value = G.pov ? 0 : 1;
   G.mComp.uniforms.tS.value = G.rtScene.texture; G.mComp.uniforms.tB.value = G.rtA.texture; pass(G.mComp, null);
 }
 
@@ -3020,7 +3071,7 @@ let DEMO = null;
 function start(data){
   try { initGL(); G.ok = true; } catch(err){ G.ok = false; console.error('WebGL unavailable', err); addEventListener('resize', sizeCS); }
   sizeCS(); wire(); voInit();
-  window.__kh = { get S(){ return S; }, selectLot, act, advance:h => advance(h), G, gen:(seed,o) => generateProfile(mulberry(seed), o||{}), think:composeThought, plotXZ, VO };
+  window.__kh = { get S(){ return S; }, selectLot, act, advance:h => advance(h), G, gen:(seed,o) => generateProfile(mulberry(seed), o||{}), think:composeThought, plotXZ, VO, blockVisible };
   DEMO = newState(); DEMO.t = 22;
   // give the title screen a lived-in street
   const demo = (i, owner, type) => DEMO.lots[i] = { owner, biz:{ type, tier:1, price:'fair', staff:[{name:'x',trait:'honest',id:'d'+i}], closedUntil:0, undercutUntil:0, till:0 }, price:2400, burned:false };

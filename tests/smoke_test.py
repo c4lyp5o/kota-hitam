@@ -27,7 +27,10 @@ CHECKS = r"""() => {
   k.act('buy', sale); ok(S.lots[sale].owner === 'you', 'buying a lot');
   k.act('open', sale, 'front'); ok(S.lots[sale].biz && S.lots[sale].biz.type === 'front', 'opening a front');
   // expansion: Titiwangsa (block 1) touches the core; Bukit Bintang (block 11) does not
+  // fog of war: Sentul (block 0) is a corner, hidden until a block next to it is unlocked
+  ok(k.blockVisible(1) && !k.blockVisible(0), 'only one layer past unlocked blocks is visible');
   k.act('expand', 16 + 1*4); ok(S.blocks.includes(1), 'expanding into an adjacent block');
+  ok(k.blockVisible(0) && !k.blockVisible(3), 'expanding reveals one more layer');
   k.act('expand', 16 + 11*4); ok(!S.blocks.includes(11), 'refusing a non-adjacent block');
   // no dead ends: a front can be built with dirty cash when clean cash is gone
   const empty = S.lots.findIndex(l => l.owner === 'sale'); k.act('buy', empty);

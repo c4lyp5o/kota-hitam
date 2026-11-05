@@ -4,22 +4,24 @@ Guidance for coding agents (Claude Code and others) working on Kota Hitam. Read 
 
 ## The project in one paragraph
 
-Kota Hitam is a noir racket tycoon set in Kuala Lumpur, 1987, played in the browser. Today it is a single-file prototype (`index.html`, about 3,000 lines) built on Three.js r187, loaded as an ES module from jsDelivr. The long-term plan is a TypeScript + Vite project with a shared simulation module that runs on both client and an authoritative game server, for a multiplayer version with realms and seasons alongside a story campaign and a sandbox mode.
+Kota Hitam is a noir racket tycoon set in Kuala Lumpur, 1987, played in the browser. Today it is a prototype built with Vite on Three.js r187 (from npm): markup and CSS in `index.html`, and the whole game in one script, `src/main.js`, about 2,700 lines of JavaScript. The long-term plan is a TypeScript project with a shared simulation module that runs on both client and an authoritative game server, for a multiplayer version with realms and seasons alongside a story campaign and a sandbox mode.
 
 ## Running and testing
 
-- Run: serve the folder statically (`npx serve .` or `python3 -m http.server`) and open `index.html` in a desktop browser.
-- Smoke test: `python3 tests/smoke_test.py` (needs `pip install playwright` and `playwright install chromium`, or set `CHROME=/path/to/chrome`). It drives the game headlessly through the `window.__kh` debug hook and fails on any page error.
+- Run: `npm install`, then `npm run dev`, and open the printed address in a desktop browser. A plain static server only works on `dist/`, because the browser can't resolve `three` from the source files.
+- Smoke test: `npm test` builds, then runs `tests/smoke_test.py` against `dist/` (needs `pip install playwright` and `playwright install chromium`, or set `CHROME=/path/to/chrome`). It drives the game headlessly through the `window.__kh` debug hook and fails on any page error.
+- CI (`.github/workflows/ci.yml`) runs `npm run format:check`, `npm run lint`, `npm run typecheck` and `npm test`.
+- `typescript` is held at 6.x because `typescript-eslint` doesn't support 7 yet. `src/main.js` isn't type-checked (`checkJs` is off), and Prettier skips it and `index.html` until they're split up.
 - Headless Chromium can render the WebGL view in software (`--use-angle=swiftshader --enable-unsafe-swiftshader --ignore-gpu-blocklist`), which is enough for screenshots of the canvas and draw-call counts but says nothing about frame rate. Page screenshots can time out because the page never goes idle, so read the canvas with `toDataURL` inside `requestAnimationFrame`. A white frame is probably lightning, not a bug: the first bolt fires 8 seconds in at night. When you change rendering code, say so and ask the user to check it in a real browser.
-- After any edit, at minimum extract the inline script and run `node --check` on it; the file is large and one syntax error blanks the whole game.
+- After any edit, at minimum run `npm run lint`; the file is large and one syntax error blanks the whole game.
 
-## Map of `index.html`
+## Map of the code
 
-Sections are marked with banner comments (`/* ===== NAME ===== */`). Search for the banner rather than trusting line numbers.
+Sections of `src/main.js` are marked with banner comments (`/* ===== NAME ===== */`). Search for the banner rather than trusting line numbers.
 
 | Section | What lives there |
 | --- | --- |
-| `<style>` | All CSS. Single committed dark look; tokens on `:root` (`--ink`, `--bone`, `--paper`, `--blood` for the player, `--lorong` for the rival, `--sodium` for money) |
+| `<style>` in `index.html` | All CSS. Single committed dark look; tokens on `:root` (`--ink`, `--bone`, `--paper`, `--blood` for the player, `--lorong` for the rival, `--sodium` for money) |
 | `DATA` | `BIZ` (13 businesses and their numbers), `GROUPS`, `RIVAL_TYPES`, `TRAITS`, `NAMES`, `HEAT_LEVELS`, `PRICE`, `BLOCKS` (12 expansion neighbourhoods), `blockAdjacent()`, `blockVisible()`, `lotAddress()` |
 | `STATE` | `newState()` (save format `v:3`, 64 lots), `S` is the live game state |
 | `SIMULATION` | `advance()`, `hourTick()`, `dayEnd()`, `raid()`, `rivalMove()`, tills (`tillCap`, `canCollect`, `collect`) |

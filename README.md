@@ -8,16 +8,16 @@ This repository holds the playable prototype (Act I) and the design notes for th
 
 ## Play the prototype
 
-The whole prototype is one file, `index.html`. It loads Three.js r187 and Google Fonts from CDNs, so it needs an internet connection.
+You need Node 22.12 or newer. Google Fonts still load from a CDN, so the game looks best with an internet connection.
 
 ```sh
-# any static file server works; opening the file directly also works in most browsers
-npx serve .
-# or
-python3 -m http.server 8000
+npm install
+npm run dev
 ```
 
-Then open `http://localhost:8000` (or the port `serve` prints). Desktop browsers only for now; headphones help.
+Then open the address Vite prints. Desktop browsers only for now; headphones help.
+
+`npm run build` writes a static build to `dist/`, and `npm run preview` serves it. Opening `index.html` directly no longer works.
 
 ## What's in the prototype
 
@@ -45,7 +45,8 @@ Then open `http://localhost:8000` (or the port `serve` prints). Desktop browsers
 
 | Path | What it is |
 | --- | --- |
-| `index.html` | The whole playable prototype: simulation, WebGL city, NPCs, audio, cutscenes, UI |
+| `index.html` | Page markup and all CSS |
+| `src/main.js` | The game script: simulation, WebGL city, NPCs, audio, cutscenes, UI |
 | `docs/DESIGN.md` | Condensed game design: systems, numbers, multiplayer and realm decisions |
 | `HANDOFF.md` | Where the project stands, what's untested, and what to build next |
 | `AGENTS.md` | Instructions for coding agents working in this repo (Claude Code reads it through `CLAUDE.md`) |

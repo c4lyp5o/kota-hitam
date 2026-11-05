@@ -1,0 +1,5 @@
+# The prototype is written densely. It gets formatted as it's split into modules (HANDOFF task 1).
+index.html
+src/main.js
+# Prose and hand-aligned tables
+*.md

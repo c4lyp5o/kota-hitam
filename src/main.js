@@ -1,0 +1,2722 @@
+import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+// Colours and the noir grade were tuned in gamma space, without colour management.
+THREE.ColorManagement.enabled = false;
+// Three dropped its legacy lights in r155. Light values here are in the old units, so scale them by pi
+// and restore the old point light falloff: the physical 1/d^decay burns out roofs right beside a lamp.
+const LIGHT_K = Math.PI;
+THREE.ShaderChunk.lights_pars_begin = THREE.ShaderChunk.lights_pars_begin.replace(
+  'float distanceFalloff = 1.0 / max( pow( lightDistance, decayExponent ), 0.01 );',
+  'return pow( saturate( 1.0 - lightDistance / cutoffDistance ), decayExponent ); float distanceFalloff = 1.0;');
+(() => {
+'use strict';
+/* =========================================================================
+   DATA
+   ========================================================================= */
+const HOURS_PER_SEC = 24 / 30;            // one in-game day = 30 s at 1×
+const START_DATE = Date.UTC(1987, 10, 2); // Monday 2 Nov 1987
+
+const BIZ = {
+  bola:   { name:'Bola betting shop',     group:'street', vice:true,  cost:900,  money:'dirty', perDay:520,  heat:2,   slots:1, day:.9,  night:1.2, color:0x2bff6a, css:'#1f9d48', vert:'BOLA', horiz:'BOLA · SPORTS CLUB', blurb:'Football odds and runners. Cheap and quiet.' },
+  ekor:   { name:'Ekor numbers',          group:'street', vice:true,  cost:700,  money:'dirty', perDay:380,  heat:1.5, slots:1, day:1.1, night:.9,  color:0xf2ff3a, css:'#a9b01c', vert:'萬字', horiz:'4D · EKOR', blurb:'Illegal four-digit lottery. Small bets, lots of them.' },
+  smokes: { name:'Contraband cigarettes', group:'street', vice:true,  cost:800,  money:'dirty', perDay:460,  heat:1.5, slots:1, day:1.1, night:.9,  color:0xff6420, css:'#c4511c', vert:'香煙', horiz:'ROKOK MURAH', blurb:'Duty-free cartons off the Thai border run.' },
+  fakes:  { name:'Counterfeit stall',     group:'street', vice:true,  cost:1000, money:'dirty', perDay:540,  heat:1.5, slots:1, day:1.3, night:.6,  color:0x9b5cff, css:'#6f45c2', vert:'名牌', horiz:'JAM · BEG · KASET', blurb:'Fake watches, handbags and pirated cassettes.' },
+  den:    { name:'Mahjong den',           group:'back',   vice:true,  cost:1200, money:'dirty', perDay:700,  heat:2.5, slots:2, day:.5,  night:1.5, color:0xff2238, css:'#d81d33', vert:'麻將', horiz:'麻將 · MAHJONG', blurb:'Tiles click till dawn. Steady money.' },
+  ahlong: { name:'Ah Long office',        group:'back',   vice:true,  cost:1500, money:'dirty', perDay:820,  heat:3,   slots:2, day:1.25,night:.7,  color:0xffb000, css:'#c98a0c', vert:'借錢', horiz:'PINJAMAN WANG', blurb:'Loans at 20% a week. Collections by day.' },
+  bar:    { name:'Back-room bar',         group:'back',   vice:true,  cost:1800, money:'dirty', perDay:1000, heat:3.5, slots:2, day:.4,  night:1.6, color:0x2f8dff, css:'#2468c9', vert:'酒', horiz:'BAR · ARAK · BIR', blurb:'Smuggled liquor off the Port Klang lorries.' },
+  parlour:{ name:'Massage parlour',       group:'back',   vice:true,  cost:2600, money:'dirty', perDay:1400, heat:5,   slots:3, day:.5,  night:1.5, color:0xff79c6, css:'#c2508f', vert:'按摩', horiz:'URUT · MASSAGE', blurb:'Hostesses upstairs and a madam downstairs who keeps the books.', respect:20 },
+  chop:   { name:'Chop shop',             group:'big',    vice:true,  cost:2200, money:'dirty', perDay:1150, heat:4,   slots:2, day:1.2, night:.8,  color:0xb6ff2a, css:'#6f9c16', vert:'車行', horiz:'BENGKEL · KERETA', blurb:'Stolen cars in, numbered parts out by morning.', respect:15 },
+  powder: { name:'Powder room',           group:'big',    vice:true,  cost:3000, money:'dirty', perDay:2000, heat:8,   slots:2, day:.6,  night:1.4, color:0xff2fd0, css:'#b51d93', vert:'藥材', horiz:'KEDAI UBAT', blurb:'A herbal shop in front. Something worse in back.', respect:25 },
+  casino: { name:'Gambling hall',         group:'big',    vice:true,  cost:4500, money:'dirty', perDay:2700, heat:6,   slots:3, day:.4,  night:1.6, color:0xffcf40, css:'#b8902a', vert:'賭場', horiz:'KELAB · CASINO', blurb:'Baccarat tables and a cashier cage. High rollers only.', respect:40 },
+  front:  { name:'Kopitiam front',        group:'front',  vice:false, cost:1200, money:'clean', perDay:180,  heat:-2,  slots:1, day:1.4, night:.5,  color:0xfff1cf, css:'#9a927f', vert:'茶室', horiz:'KOPITIAM', blurb:'Washes RM 900 of dirty cash a day at 80%.', launder:900, rate:.8 },
+  laundry:{ name:'Laundromat front',      group:'front',  vice:false, cost:3000, money:'clean', perDay:250,  heat:-3,  slots:1, day:1.3, night:.6,  color:0xbfe9ff, css:'#5f8ea3', vert:'洗衣', horiz:'DOBI · LAUNDRY', blurb:'Washes RM 1,800 a day at 85%. A laundry that launders.', launder:1800, rate:.85, respect:30 },
+};
+const BIZ_ORDER = Object.keys(BIZ);
+const GROUPS = [['street','Street rackets'],['back','Back rooms'],['big','Big money'],['front','Fronts']];
+const RIVAL_TYPES = ['bola','den','bar','ahlong','ekor','smokes','fakes','parlour'];
+
+const TRAITS = {
+  honest: { label:'Honest',          wage:60, note:'Steady. No surprises.' },
+  sharp:  { label:'Sharp',           wage:95, note:'+25% takings.' },
+  sticky: { label:'Sticky-fingered', wage:40, note:'Skims a quarter of the till.' },
+  talker: { label:'Talkative',       wage:50, note:'+60% heat from this place.' },
+  tough:  { label:'Tough',           wage:80, note:'Stops sabotage and arson here.' },
+};
+const NAMES = ['Ah Keong','Siti Aminah','Ravi','Ah Mui','Faizal','Kumar','Mei Ling','Zul','Ah Pang','Devi','Lim Kok Wah','Rosli','Selvam','Ah Beng','Nora','Jamal','Kavitha','Tan Ah Huat','Azman','Wei Jie','Priya','Hafiz','Ah Choy','Murugan','Salmah','Chin Fatt','Ganesh','Yati'];
+
+const HEAT_LEVELS = ['Whispers','Patrols','Raids','Task force','Crackdown'];
+const PRICE = { cheap:{label:'Cheap',inc:.8,share:1.25}, fair:{label:'Fair',inc:1,share:1}, steep:{label:'Steep',inc:1.25,share:.8} };
+
+const BLOCKS = [
+  { c:[-21,-21], name:'Sentul',            blurb:'Railway yards and warehouses. Anything that comes by lorry ends up here.' },
+  { c:[-7,-21],  name:'Titiwangsa',        blurb:'Lake Gardens on one side, quiet money on the other.' },
+  { c:[7,-21],   name:'Jalan Pahang',      blurb:'Hospital traffic day and night, and doctors with gambling debts.' },
+  { c:[21,-21],  name:'Kampung Baru North',blurb:'Wooden village houses and a night market that never sleeps.' },
+  { c:[-21,-7],  name:'Jalan Ipoh',        blurb:'Bus depots and mechanics. Cars go missing here.' },
+  { c:[21,-7],   name:'Kampung Baru',      blurb:'Satay stalls, old families and long memories.' },
+  { c:[-21,7],   name:'Jalan TAR',         blurb:'Cloth shops by day, cabarets by night.' },
+  { c:[21,7],    name:'Jalan Raja Muda',   blurb:'Government quarters. Clerks with expensive habits.' },
+  { c:[-21,21],  name:'Masjid India',      blurb:'Textile merchants and money changers who ask no questions.' },
+  { c:[-7,21],   name:'Dang Wangi',        blurb:'The police district headquarters is two streets away. Bold.' },
+  { c:[7,21],    name:'Jalan Ampang',      blurb:'Embassy cars and bankers who like a quiet card game.' },
+  { c:[21,21],   name:'Bukit Bintang',     blurb:'Where the real money drinks. Mat Botak\'s bosses have friends here.' },
+];
+const CORE_BLOCKS = [[-7,-7],[7,-7],[-7,7],[7,7]];
+const LOT_COUNT = 16 + BLOCKS.length*4;
+function blockOf(i){ return i < 16 ? -1 : Math.floor((i-16)/4); }
+function unlockedCenters(){ return CORE_BLOCKS.concat((S.blocks||[]).map(b => BLOCKS[b].c)); }
+function blockAdjacent(b){ const [x,z] = BLOCKS[b].c; return unlockedCenters().some(([ux,uz]) => Math.abs(ux-x) + Math.abs(uz-z) === 14); }
+function blockVisible(b){ return (S.blocks||[]).includes(b) || blockAdjacent(b); }
+function expandCost(){ return Math.round((6000 + 3000*(S.blocks||[]).length) * (S.discount || 1) / 100)*100; }
+function expandRespect(){ return 15 + 5*(S.blocks||[]).length; }
+function lotAddress(i){
+  if (i >= 16){ const b = blockOf(i); return `Plot ${(i-16)%4 + 1}, ${BLOCKS[b].name}`; }
+  const r = Math.floor(i/4), c = i%4;
+  return [`No. ${c*2+1}, Jalan Raja Alang`, `No. ${c*2+1}, Jalan Raja Bot`, `No. ${c*2+2}, Jalan Raja Bot`, `No. ${c*2+2}, Lorong Haji Taib`][r];
+}
+const WIN_LOTS = 10;
+
+/* =========================================================================
+   STATE
+   ========================================================================= */
+let S = null;
+let speed = 1, prevSpeed = 1;
+let selected = -1;
+
+function rnd(a,b){ return a + Math.random()*(b-a); }
+function pick(a){ return a[Math.floor(Math.random()*a.length)]; }
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+function fmt(n){ return 'RM ' + Math.round(n).toLocaleString('en-US'); }
+
+function newCandidate(){
+  const trait = pick(['honest','honest','sharp','sticky','talker','tough','tough','sharp']);
+  return { name: pick(NAMES), trait, id: Math.random().toString(36).slice(2,8) };
+}
+function newState(){
+  const lots = [];
+  for (let i=0;i<LOT_COUNT;i++) lots.push({ owner: i < 16 ? 'sale' : 'locked', biz:null, price: 2000 + Math.round(Math.random()*7)*200, burned:false });
+  lots[9] = { owner:'you', biz:{ type:'den', tier:1, price:'fair', staff:[{name:'Ah Keong',trait:'honest',id:'k0'}], closedUntil:0, undercutUntil:0, till:120 }, price:2400, burned:false };
+  const rivalSet = { 2:'bola', 5:'bar', 7:'ahlong', 11:'den', 13:'smokes', 15:'parlour' };
+  for (const k in rivalSet) lots[k] = { owner:'rival', biz:{ type:rivalSet[k], tier:1, price:'fair', staff:[], closedUntil:0, undercutUntil:0, till:0 }, price:2600, burned:false };
+  return {
+    v:3, t:20, dirty:2400, clean:4200, respect:15, muscle:1, heat:10,
+    lieLow:false, bribeAt:-99, sitAt:-999, truceUntil:0,
+    lots, blocks:[], rival:{ cash:1500, muscle:3, nextMove:44 },
+    board:[newCandidate(),newCandidate(),newCandidate(),newCandidate()],
+    log:[], week:{ income:0, wages:0, laundered:0, seized:0, heat0:10, events:[] },
+    flags:{ firstOpen:false, firstTake:false, actDone:false, over:false, tip:false }, policeLot:-1, policeUntil:0,
+    fires:[],
+  };
+}
+
+/* ---------- derived ---------- */
+function isClosed(b){ return b.closedUntil > S.t; }
+function tillCap(b){ return BIZ[b.type].perDay * 1.5 * (1 + (b.tier-1)*.5); }
+function canCollect(i){ const l = S && S.lots[i]; return !!(l && l.owner === 'you' && l.biz && (l.biz.till||0) >= Math.max(40, tillCap(l.biz)*.12)); }
+function collect(i, fee){
+  const l = S.lots[i], b = l.biz, amt = (b.till||0) * (1 - (fee||0)); if (amt <= 0) return 0;
+  if (BIZ[b.type].money === 'clean') S.clean += amt; else S.dirty += amt;
+  b.till = 0;
+  if (!fee){ floatText(i, '+' + fmt(amt) + (BIZ[b.type].money === 'clean' ? ' clean' : '')); sfx.cash(); updateHUD(); renderFile(); }
+  return amt;
+}
+function floatText(i, text){
+  const p = screenOf(i), el = document.createElement('div'); el.className = 'pop'; el.textContent = text;
+  el.style.left = p.x + 'px'; el.style.top = p.y + 'px'; document.body.appendChild(el); setTimeout(() => el.remove(), 1300);
+}
+function staffEff(b){
+  const def = BIZ[b.type], slots = def.slots + (b.tier-1);
+  let eff = 0; for (const s of b.staff) eff += s.trait === 'sharp' ? 1.25 : 1;
+  return Math.min(eff, slots*1.25) / slots;
+}
+function slotsOf(b){ return BIZ[b.type].slots + (b.tier-1); }
+function phaseOf(h){ return (h >= 6 && h < 9) ? 'morning' : (h >= 9 && h < 18) ? 'day' : (h >= 18 && h < 21) ? 'dusk' : 'night'; }
+function phaseMult(def, h){ const p = phaseOf(h); return (p === 'night' || p === 'dusk') ? def.night : def.day; }
+function lotScore(l, who){
+  if (!l.biz) return 0;
+  let s = 1 + (l.biz.tier-1)*0.5;
+  if (isClosed(l.biz)) s *= .5;
+  if (who === 'you') s *= PRICE[l.biz.price].share;
+  return s;
+}
+function shares(){
+  let y=0, r=0, n=0;
+  for (const l of S.lots){
+    if (l.owner === 'you') y += l.biz ? lotScore(l,'you') : .35;
+    else if (l.owner === 'rival') r += lotScore(l,'rival');
+    else if (l.owner === 'sale') n += .45;
+  }
+  y *= (0.8 + S.respect/250);
+  const tot = y + r + n || 1;
+  return { you:y/tot, riv:r/tot, open:n/tot };
+}
+function ownedCount(){ return S.lots.filter(l => l.owner === 'you').length; }
+function heatLevel(){ return clamp(Math.floor(S.heat/20), 0, 4); }
+function bizIncomeHour(l, h, sh){
+  const b = l.biz, def = BIZ[b.type];
+  if (isClosed(b) || !b.staff.length) return 0;
+  let inc = def.perDay/24 * phaseMult(def,h) * staffEff(b) * PRICE[b.price].inc * (1 + (b.tier-1)*0.5) * (0.55 + 0.9*sh);
+  if (b.undercutUntil > S.t) inc *= .6;
+  if (def.vice && S.lieLow) inc *= .3;
+  const sticky = b.staff.filter(s => s.trait === 'sticky').length;
+  inc *= (1 - 0.25*sticky/slotsOf(b));
+  return inc;
+}
+function bizHeatHour(l){
+  const b = l.biz, def = BIZ[b.type];
+  if (isClosed(b) || !b.staff.length) return 0;
+  let h = def.heat/24 * (1 + (b.tier-1)*0.3);
+  if (h > 0){
+    const talk = b.staff.filter(s => s.trait === 'talker').length;
+    h *= 1 + 0.6*talk;
+    if (S.lieLow) h *= .3;
+  }
+  return h;
+}
+function estDaily(l){
+  const sh = shares().you; let inc=0, heat=0;
+  for (let h=0;h<24;h++){ inc += bizIncomeHour(l,h,sh); heat += bizHeatHour(l); }
+  return { inc, heat };
+}
+
+/* ---------- log ---------- */
+function stamp(){ const d = Math.floor(S.t/24), h = Math.floor(S.t%24); return `D${d+1} ${String(h).padStart(2,'0')}:00`; }
+function log(text, kind=''){
+  S.log.unshift({ t:stamp(), text, kind });
+  S.log.length = Math.min(S.log.length, 30);
+  renderLog();
+}
+function weekEvent(sev, head, deck){ S.week.events.push({ sev, head, deck }); }
+
+/* =========================================================================
+   SIMULATION
+   ========================================================================= */
+function advance(hours){
+  const target = S.t + hours;
+  while (Math.floor(S.t) < Math.floor(target)){
+    S.t = Math.floor(S.t) + 1;
+    hourTick();
+    if (S.flags.over) return;
+  }
+  S.t = target;
+}
+
+function hourTick(){
+  const h = S.t % 24, sh = shares().you;
+  let heatDelta = -(S.lieLow ? 6 : 1.5) / 24;
+  for (const l of S.lots){
+    if (l.owner !== 'you' || !l.biz) continue;
+    const def = BIZ[l.biz.type];
+    const cap = tillCap(l.biz), inc = Math.min(bizIncomeHour(l, h, sh), Math.max(0, cap - (l.biz.till||0)));
+    l.biz.till = (l.biz.till || 0) + inc;
+    S.week.income += inc;
+    heatDelta += bizHeatHour(l);
+    if (def.launder && !isClosed(l.biz) && l.biz.staff.length){
+      const amt = Math.min(Math.max(S.dirty,0), def.launder/24 * staffEff(l.biz) * (1 + (l.biz.tier-1)*0.5));
+      S.dirty -= amt; S.clean += amt*def.rate; S.week.laundered += amt;
+    }
+  }
+  S.heat = clamp(S.heat + heatDelta, 0, 100);
+
+  // rival income
+  S.rival.cash += S.lots.filter(l => l.owner === 'rival' && l.biz && !isClosed(l.biz)).length * 14;
+
+  // raids
+  if (S.heat >= 40){
+    const p = (S.heat - 35) / 1500 * (S.heat >= 80 ? 1.8 : 1);
+    if (Math.random() < p) raid();
+  }
+  // fires burn out
+  S.fires = S.fires.filter(f => f.until > S.t);
+  if (S.policeUntil < S.t) S.policeLot = -1;
+
+  if (h === 0) dayEnd();
+  if (h === 6 && Math.floor(S.t/24) % 7 === 0 && S.t > 24) G.overlays.push(showPaper);
+  if (h === 6) { S.board = [newCandidate(),newCandidate(),newCandidate(),newCandidate()]; }
+
+  if (S.t >= S.rival.nextMove) rivalMove();
+  if (!S.flags.tip && S.t > 24*5 && S.lots.some(l => l.owner === 'rival') && Math.random() < .015){ S.flags.tip = true; G.overlays.push(showTip); }
+
+  if (S.heat >= 100 && !S.flags.over){ S.flags.over = true; fall(); return; }
+  if (ownedCount() >= WIN_LOTS && !S.flags.actDone){ S.flags.actDone = true; actComplete(); }
+  if (selected >= 0) renderFile();
+  updateGoals();
+}
+
+const DIRTY_MARKUP = 1.6, CHANGER_MAX = 1500, CHANGER_RATE = .6;
+function hasFront(){ return S.lots.some(l => l.owner === 'you' && l.biz && BIZ[l.biz.type].launder); }
+// how a business gets paid for: clean money normally; a front can also be built with dirty cash, at a markup
+function payPlan(def, rebuild){
+  if (def.money !== 'clean') return { kind:'dirty', amt:def.cost + rebuild, ok:S.dirty >= def.cost + rebuild };
+  const c = def.cost + rebuild, d = Math.round((def.cost*DIRTY_MARKUP + rebuild)/100)*100;
+  if (S.clean >= c) return { kind:'clean', amt:c, ok:true, alt:d };
+  return { kind:'dirty', amt:d, ok:S.dirty >= d, cleanAmt:c, markup:true };
+}
+function changerReady(){ return S.t - (S.washAt == null ? -99 : S.washAt) >= 12; }
+function dayEnd(){
+  let wages = 0, upkeep = 0;
+  for (const l of S.lots){
+    if (l.owner !== 'you' || !l.biz) continue;
+    upkeep += 40;
+    for (const s of l.biz.staff) wages += TRAITS[s.trait].wage;
+  }
+  wages += S.muscle * 80;
+  const total = wages + upkeep;
+  S.dirty -= total; S.week.wages += total;
+  if (S.dirty < 0){
+    const all = []; S.lots.forEach(l => { if (l.owner==='you' && l.biz) l.biz.staff.forEach(s => all.push([l,s])); });
+    if (all.length){
+      const [l,s] = pick(all); l.biz.staff = l.biz.staff.filter(x => x !== s);
+      S.respect = clamp(S.respect - 5, 0, 100);
+      log(`Payroll came up short. ${s.name} walked out of ${BIZ[l.biz.type].name.toLowerCase()} for good.`, 'bad');
+    } else if (S.muscle > 0){ S.muscle--; log('Payroll came up short. One of your enforcers quit.', 'bad'); }
+  }
+  if (!hasFront() && S.clean < BIZ.front.cost && !S.flags.washHint){
+    S.flags.washHint = true;
+    log('Tip: you have no laundering front and little clean cash. Use the money changer, or build a kopitiam with dirty cash at a markup.', 'good');
+  }
+  // respect drifts up with held turf
+  S.respect = clamp(S.respect + ownedCount()*0.4, 0, 100);
+  autosave();
+}
+
+function raid(){
+  const targets = S.lots.map((l,i)=>[l,i]).filter(([l]) => l.owner==='you' && l.biz && BIZ[l.biz.type].vice && !isClosed(l.biz));
+  if (!targets.length) return;
+  const [l,i] = pick(targets);
+  const seized = Math.round(Math.max(S.dirty,0)*.1 + (l.biz.till||0));
+  l.biz.till = 0;
+  l.biz.closedUntil = S.t + 48;
+  S.dirty -= seized; S.week.seized += seized;
+  S.heat = clamp(S.heat - 8, 0, 100);
+  S.respect = clamp(S.respect - 4, 0, 100);
+  S.policeLot = i; S.policeUntil = S.t + 10;
+  log(`POLICE RAID on your ${BIZ[l.biz.type].name.toLowerCase()} at ${lotAddress(i)}. ${fmt(seized)} seized, shut for two days.`, 'bad');
+  weekEvent(3, `Police raid ${BIZ[l.biz.type].name.toLowerCase()} in Chow Kit`, `Officers seize ${fmt(seized)} in cash at ${lotAddress(i)}; operators remain at large.`);
+  news('raid', i);
+  sfx.siren(); vignette('raid', 'Blue and red on wet tarmac. Somebody talked. Somebody always talks.');
+}
+
+function rivalMove(){
+  S.rival.nextMove = S.t + rnd(30, 50);
+  if (S.truceUntil > S.t) return;
+  const sh = shares();
+  const myBiz = S.lots.map((l,i)=>[l,i]).filter(([l]) => l.owner==='you' && l.biz);
+  const sale = S.lots.map((l,i)=>[l,i]).filter(([l]) => l.owner==='sale');
+  const opts = [];
+  if (sale.length && S.rival.cash > 1800) opts.push(['expand', 4]);
+  if (myBiz.length) opts.push(['undercut', 3], ['sabotage', 2]);
+  if (myBiz.some(([l]) => l.biz.staff.length)) opts.push(['poach', 2]);
+  if (S.t > 72 && myBiz.length >= 2 && sh.you > 0.28) opts.push(['torch', 1 + sh.you*6]);
+  if (!opts.length) return;
+  let r = Math.random() * opts.reduce((a,o)=>a+o[1],0), move = opts[0][0];
+  for (const o of opts){ if ((r -= o[1]) <= 0){ move = o[0]; break; } }
+  const toughAt = l => l.biz.staff.some(s => s.trait === 'tough');
+
+  if (move === 'expand'){
+    const [l,i] = pick(sale);
+    S.rival.cash -= Math.min(S.rival.cash, l.price);
+    l.owner = 'rival'; l.burned = false;
+    l.biz = { type: pick(RIVAL_TYPES), tier:1, price:'fair', staff:[], closedUntil:0, undercutUntil:0, till:0 };
+    news('rivalbought', i);
+    log(`Geng Lorong bought ${lotAddress(i)} and opened a ${BIZ[l.biz.type].name.toLowerCase()}.`, 'rival');
+  } else if (move === 'undercut'){
+    const [l] = myBiz.sort((a,b)=>BIZ[b[0].biz.type].perDay - BIZ[a[0].biz.type].perDay)[0];
+    l.biz.undercutUntil = S.t + 48;
+    log(`Mat Botak is undercutting your ${BIZ[l.biz.type].name.toLowerCase()}. Takings down 40% for two days.`, 'rival');
+  } else if (move === 'poach'){
+    const withStaff = myBiz.filter(([l]) => l.biz.staff.length);
+    const [l] = pick(withStaff);
+    if (Math.random() < 0.6 - S.respect/250){
+      const s = l.biz.staff.sort((a,b)=>(b.trait==='sharp')-(a.trait==='sharp'))[0];
+      l.biz.staff = l.biz.staff.filter(x => x !== s);
+      log(`${s.name} took Geng Lorong's money and left your ${BIZ[l.biz.type].name.toLowerCase()}.`, 'bad');
+      S.respect = clamp(S.respect - 2, 0, 100);
+    } else log(`Geng Lorong tried to buy off your staff. Nobody bit.`, 'good');
+  } else if (move === 'sabotage'){
+    const [l,i] = pick(myBiz);
+    if (toughAt(l) || Math.random() < 0.2 + S.muscle*0.05){ log(`Your people ran off Geng Lorong boys loitering at ${lotAddress(i)}.`, 'good'); S.respect = clamp(S.respect+1,0,100); }
+    else {
+      l.biz.closedUntil = Math.max(l.biz.closedUntil, S.t + 24); S.heat = clamp(S.heat + 8, 0, 100);
+      log(`Sabotage: someone tipped off the police and smashed up your ${BIZ[l.biz.type].name.toLowerCase()}. Shut for a day, heat +8.`, 'bad');
+    }
+  } else if (move === 'torch'){
+    const [l,i] = myBiz.sort((a,b)=>BIZ[b[0].biz.type].perDay - BIZ[a[0].biz.type].perDay)[0];
+    const chance = 0.5 - S.muscle*0.07 - (toughAt(l) ? 0.3 : 0);
+    if (Math.random() < chance){
+      const name = BIZ[l.biz.type].name;
+      l.biz = null; l.burned = true; S.respect = clamp(S.respect - 4, 0, 100);
+      S.fires.push({ lot:i, until:S.t + 8 });
+      log(`FIRE at ${lotAddress(i)}. Geng Lorong torched your ${name.toLowerCase()}. The lot is still yours.`, 'bad');
+      news('fire', i);
+      weekEvent(4, `Shophouse blaze on Jalan Raja Bot`, `Fire department suspects arson; neighbours speak of a gang feud.`);
+      sfx.fire(); vignette('fire', 'Petrol and a match. Mat Botak never was subtle.');
+    } else {
+      S.respect = clamp(S.respect + 3, 0, 100);
+      log(`Your boys caught two Geng Lorong runners with petrol cans behind ${lotAddress(i)}.`, 'good');
+    }
+  }
+}
+
+/* ---------- player actions ---------- */
+function act(kind, i, arg){
+  const l = i >= 0 ? S.lots[i] : null;
+  switch(kind){
+    case 'buy':
+      if (S.clean < l.price) return;
+      S.clean -= l.price; l.owner = 'you'; l.biz = null;
+      log(`You bought ${lotAddress(i)} for ${fmt(l.price)} clean.`, 'good'); sfx.cash(); news('bought', i);
+      break;
+    case 'open': {
+      const def = BIZ[arg], rebuild = l.burned ? 400 : 0;
+      if (def.respect && S.respect < def.respect) return;
+      const plan = payPlan(def, rebuild); if (!plan.ok) return;
+      if (plan.kind === 'clean') S.clean -= plan.amt; else S.dirty -= plan.amt;
+      if (plan.markup){ S.heat = clamp(S.heat + 3, 0, 100); log(`No clean money, so the contractor took ${fmt(plan.amt)} in dirty cash and asked no questions. Heat +3.`, ''); }
+      l.biz = { type:arg, tier:1, price:'fair', staff:[], closedUntil:0, undercutUntil:0, till:0 }; l.burned = false;
+      S.respect = clamp(S.respect + 2, 0, 100);
+      log(`Opened a ${def.name.toLowerCase()} at ${lotAddress(i)}. Hire staff to get it running.`, 'good'); sfx.cash();
+      if (!S.flags.firstOpen){ S.flags.firstOpen = true; vignette('open', 'Another door, another back room. The neon said open. The ledger said more.', i); }
+      break; }
+    case 'upgrade': {
+      const def = BIZ[l.biz.type], c = Math.round(def.cost*1.2);
+      if (def.money === 'clean' ? S.clean < c : S.dirty < c) return;
+      if (def.money === 'clean') S.clean -= c; else S.dirty -= c;
+      l.biz.tier = 2; log(`${def.name} at ${lotAddress(i)} expanded into the floor upstairs.`, 'good'); sfx.cash();
+      break; }
+    case 'price': l.biz.price = arg; break;
+    case 'hire': {
+      const c = S.board.find(x => x.id === arg); if (!c) return;
+      const fee = TRAITS[c.trait].wage*2; if (S.dirty < fee || l.biz.staff.length >= slotsOf(l.biz)) return;
+      S.dirty -= fee; l.biz.staff.push({ name:c.name, trait:c.trait, id:c.id });
+      S.board = S.board.filter(x => x !== c);
+      log(`${c.name} (${TRAITS[c.trait].label.toLowerCase()}) starts tonight at ${lotAddress(i)}.`); sfx.click();
+      break; }
+    case 'fire':
+      l.biz.staff = l.biz.staff.filter(s => s.id !== arg); sfx.click();
+      break;
+    case 'collect': collect(i); return;
+    case 'expand': {
+      const b = blockOf(i), cost = expandCost();
+      if (b < 0 || !blockAdjacent(b) || S.clean < cost || S.respect < expandRespect() || S.blocks.includes(b)) return;
+      S.clean -= cost; S.blocks.push(b); S.discount = 1; news('expand', i, BLOCKS[b].name);
+      for (let k=0;k<4;k++){ const L = S.lots[16 + b*4 + k]; L.owner = 'sale'; L.price = 1800 + Math.round(Math.random()*6)*200; }
+      log(`You paid the headman. ${BLOCKS[b].name} is open: four plots for sale.`, 'good');
+      weekEvent(2, `Shophouses in ${BLOCKS[b].name} change hands`, `A newcomer is buying up the street; long-time tenants say the offers were hard to refuse.`);
+      sfx.cash(); floatText(i, BLOCKS[b].name + ' is open');
+      if (G.ok){ G.camGoal = { x:BLOCKS[b].c[0], z:BLOCKS[b].c[1] }; }
+      break; }
+    case 'close':
+      log(`You shut the ${BIZ[l.biz.type].name.toLowerCase()} at ${lotAddress(i)}. The room is empty again.`);
+      l.biz = null; break;
+    case 'strong': {
+      if (S.dirty < 400 || S.muscle < 1) return;
+      S.dirty -= 400;
+      const ok = Math.random() < 0.5 + 0.08*S.muscle - 0.06*S.rival.muscle + S.respect/400;
+      if (ok){ news('strong', i); l.biz.closedUntil = S.t + 48; S.heat = clamp(S.heat+5,0,100); S.respect = clamp(S.respect+2,0,100);
+        log(`Your enforcers leaned on Geng Lorong's ${BIZ[l.biz.type].name.toLowerCase()}. Shut for two days.`, 'good'); sfx.thud(); }
+      else { S.heat = clamp(S.heat+6,0,100); S.respect = clamp(S.respect-3,0,100); if (Math.random()<.4 && S.muscle>0){ S.muscle--; log('The shakedown went wrong. One of your enforcers is in Pudu lock-up.', 'bad'); } else log('The shakedown went wrong. Geng Lorong stood their ground.', 'bad'); }
+      break; }
+    case 'torch': {
+      if (S.dirty < 900 || S.muscle < 2) return;
+      S.dirty -= 900;
+      const ok = Math.random() < 0.42 + 0.08*S.muscle - 0.05*S.rival.muscle;
+      if (ok){
+        const name = BIZ[l.biz.type].name;
+        l.owner = 'sale'; l.biz = null; l.burned = true; l.price = Math.round(l.price*0.7/100)*100;
+        S.heat = clamp(S.heat+14,0,100); S.respect = clamp(S.respect+5,0,100);
+        S.fires.push({ lot:i, until:S.t+8 });
+        log(`${lotAddress(i)} burned. Geng Lorong lost their ${name.toLowerCase()}. The lot is up for sale.`, 'good');
+        news('torch', i);
+        weekEvent(4, `Night fire guts Chow Kit ${name.toLowerCase()}`, `Witnesses saw men with jerry cans; police appeal for information.`);
+        sfx.fire(); vignette('fire', 'You don\'t argue with a man about his shop. You argue with the shop.');
+      } else {
+        S.heat = clamp(S.heat+10,0,100); S.respect = clamp(S.respect-4,0,100);
+        if (S.muscle>0) S.muscle--;
+        log('The torch job failed. Geng Lorong caught one of your men and sent him back without his teeth.', 'bad');
+      }
+      break; }
+    case 'buyout': {
+      const c = l.price*2; if (S.clean < c || S.respect < 45) return;
+      S.clean -= c; l.owner = 'you'; l.biz.staff = []; l.biz.closedUntil = 0; l.biz.till = 0; S.heat = clamp(S.heat+2,0,100);
+      log(`You made Geng Lorong an offer for ${lotAddress(i)}. They took it. It's yours, staff not included.`, 'good'); sfx.cash();
+      if (!S.flags.firstTake){ S.flags.firstTake = true; vignette('take', 'Money talks. Clean money talks in a nicer voice.', i); }
+      break; }
+  }
+  updateHUD(); renderFile(); updateGoals();
+}
+
+/* =========================================================================
+   HUD / UI
+   ========================================================================= */
+const $ = id => document.getElementById(id);
+function updateHUD(){
+  const d = Math.floor(S.t/24), h = S.t%24;
+  const date = new Date(START_DATE + d*864e5);
+  $('cDate').textContent = date.toLocaleDateString('en-GB', { weekday:'short', day:'numeric', month:'short', year:'numeric', timeZone:'UTC' });
+  $('cTime').textContent = `${String(Math.floor(h)).padStart(2,'0')}:${String(Math.floor((h%1)*60/10)*10).padStart(2,'0')}`;
+  const ph = phaseOf(Math.floor(h));
+  $('cPhase').textContent = ph; $('cPhase').className = 'phase' + (ph === 'night' || ph === 'dusk' ? ' night' : '');
+  $('rDirty').textContent = fmt(S.dirty); $('rClean').textContent = fmt(S.clean);
+  $('rResp').textContent = Math.round(S.respect); $('rMuscle').textContent = S.muscle + ' / 6';
+  const lvl = heatLevel(); $('heatName').textContent = HEAT_LEVELS[lvl] + ` (${Math.round(S.heat)})`;
+  [...$('heatBar').children].forEach((el,k) => { el.firstChild.style.transform = `scaleX(${clamp((S.heat - k*20)/20,0,1)})`; });
+  const sh = shares();
+  $('tbYou').style.width = (sh.you*100)+'%'; $('tbOpen').style.width = (sh.open*100)+'%'; $('tbRiv').style.width = (sh.riv*100)+'%';
+  $('tYou').textContent = Math.round(sh.you*100)+'%'; $('tRiv').textContent = Math.round(sh.riv*100)+'%';
+  const bc = bribeCost();
+  $('aBribeC').textContent = S.t - S.bribeAt < 24 ? 'chief is lying low · tomorrow' : `${fmt(bc)} · heat −15`;
+  $('aBribe').disabled = S.t - S.bribeAt < 24 || S.dirty < bc || S.heat < 1;
+  $('aLow').setAttribute('aria-pressed', S.lieLow);
+  $('aMuscle').disabled = S.dirty < 350 || S.muscle >= 6;
+  const wAmt = Math.min(CHANGER_MAX, Math.max(0, Math.floor(S.dirty)));
+  $('aWash').disabled = !changerReady() || wAmt < 100;
+  $('aWashC').textContent = !changerReady() ? 'Masjid India · back tomorrow' : `${fmt(wAmt)} dirty → ${fmt(wAmt*CHANGER_RATE)} clean · heat +4`;
+  const sitReady = S.t - S.sitAt >= 168;
+  $('aSitC').textContent = S.truceUntil > S.t ? `truce holds · ${Math.ceil((S.truceUntil-S.t)/24)} day(s) left` : sitReady ? 'RM 1,500 · 3-day truce' : 'Mat Botak won\'t meet again this week';
+  $('aSit').disabled = !sitReady || S.dirty < 1500 || S.truceUntil > S.t;
+}
+function bribeCost(){ return Math.round((400 + S.heat*15)/50)*50; }
+function renderLog(){
+  $('log').innerHTML = S.log.slice(0,8).map(e => `<p class="${e.kind}"><time>${e.t}</time>${e.text}</p>`).join('');
+}
+function updateGoals(){
+  const den = S.lots.some(l => l.owner==='you' && l.biz && l.biz.type==='den' && l.biz.staff.length >= 2);
+  if (den) S.flags.g1 = true;
+  if (S.lots.some(l => l.owner==='you' && l.biz && BIZ[l.biz.type].launder)) S.flags.g2 = true;
+  $('g1').classList.toggle('done', !!S.flags.g1);
+  $('g2').classList.toggle('done', !!S.flags.g2);
+  const n = ownedCount(); $('g3n').textContent = `(${n}/${WIN_LOTS})`; $('g3').classList.toggle('done', n >= WIN_LOTS);
+}
+
+function renderFile(){
+  const f = $('file');
+  if (selected < 0){ f.hidden = true; return; }
+  f.hidden = false;
+  const i = selected, l = S.lots[i];
+  const head = `<div class="tab"><span>Case file · Lot ${String(i+1).padStart(2,'0')}</span><button class="close" data-a="closefile" aria-label="Close case file">✕</button></div>`;
+  let body;
+  if (l.owner === 'locked'){
+    const b = blockOf(i), B = BLOCKS[b], adj = blockAdjacent(b), cost = expandCost(), needR = expandRespect();
+    body = `<span class="stamp sale">Not yet yours</span><h3>${B.name}</h3><p class="addr">Four plots, ${B.name}</p>
+      <p>${B.blurb}</p>
+      <p>${adj ? 'The headman says the owners will sell, to the right buyer, for the right envelope. Pay him and the block opens up as four plots for sale. Geng Lorong will be watching too.' : 'Too far from your turf. Take over a neighbouring block first.'}</p>
+      <dl><dt>The headman's price</dt><dd>${fmt(cost)} clean</dd><dt>Respect needed</dt><dd>${needR}</dd><dt>Your clean cash</dt><dd>${fmt(S.clean)}</dd><dt>Your respect</dt><dd>${Math.round(S.respect)}</dd></dl>
+      <div class="row"><button class="stampbtn" data-a="expand" ${!adj || S.clean < cost || S.respect < needR ? 'disabled' : ''}>Open up ${B.name}</button></div>`;
+  } else if (l.owner === 'sale'){
+    body = `<span class="stamp sale">For sale</span><h3>${l.burned ? 'Burnt-out shophouse' : 'Empty shophouse'}</h3><p class="addr">${lotAddress(i)}</p>
+      <p>${l.burned ? 'Smoke-black walls, a good address. The owner wants it gone.' : 'Two floors and a five-foot way. The landlord takes cash, as long as it\'s clean.'}</p>
+      <dl><dt>Asking price</dt><dd>${fmt(l.price)} clean</dd><dt>Your clean cash</dt><dd>${fmt(S.clean)}</dd></dl>
+      <div class="row"><button class="stampbtn" data-a="buy" ${S.clean < l.price ? 'disabled' : ''}>Buy the lot</button></div>
+      ${S.clean < l.price ? '<p class="note" style="margin-top:8px">Not enough clean cash. A kopitiam front washes dirty money, and a money changer will wash some at a poor rate.</p>'
+        : !hasFront() && S.clean - l.price < BIZ.front.cost ? `<p class="note" style="margin-top:8px"><b>Careful:</b> you have no laundering front yet, and this leaves ${fmt(S.clean - l.price)} clean, less than a kopitiam costs. You'd have to build one with dirty cash at a markup, or use the money changer.</p>` : ''}`;
+  } else if (l.owner === 'rival'){
+    const def = BIZ[l.biz.type], closed = isClosed(l.biz);
+    const sOk = Math.round(clamp(0.5 + 0.08*S.muscle - 0.06*S.rival.muscle + S.respect/400,0,1)*100);
+    const tOk = Math.round(clamp(0.42 + 0.08*S.muscle - 0.05*S.rival.muscle,0,1)*100);
+    body = `<span class="stamp riv">Geng Lorong</span>${closed ? ' <span class="stamp shut">Shut</span>' : ''}<h3>${def.name}</h3><p class="addr">${lotAddress(i)}</p>
+      <p>Mat Botak's people run this place. ${def.blurb}</p>
+      <dl><dt>Their muscle</dt><dd>${S.rival.muscle}</dd><dt>Your muscle</dt><dd>${S.muscle}</dd><dt>Your respect</dt><dd>${Math.round(S.respect)}</dd></dl>
+      <h4>Jobs</h4>
+      <div class="biz-list">
+        <button class="biz-opt" data-a="strong" ${S.dirty<400||S.muscle<1||closed?'disabled':''}><span class="sw" style="background:#4b463d"></span><span><b>Strong-arm</b><small>Shut it for two days · ${sOk}% odds · heat +5 · needs 1 muscle</small></span><span class="cost">RM 400</span></button>
+        <button class="biz-opt" data-a="torch" ${S.dirty<900||S.muscle<2?'disabled':''}><span class="sw" style="background:#a3141f"></span><span><b>Torch it</b><small>Burn them out; the lot goes up for sale · ${tOk}% odds · heat +14 · needs 2 muscle</small></span><span class="cost">RM 900</span></button>
+        <button class="biz-opt" data-a="buyout" ${S.clean<l.price*2||S.respect<45?'disabled':''}><span class="sw" style="background:#9a927f"></span><span><b>Buy them out</b><small>Take it over as it stands · needs respect 45</small></span><span class="cost">${fmt(l.price*2)} clean</span></button>
+      </div>`;
+  } else if (!l.biz){
+    const rebuild = l.burned ? 400 : 0;
+    body = `<span class="stamp you">Yours</span><h3>${l.burned ? 'Burnt-out shophouse' : 'Empty shophouse'}</h3><p class="addr">${lotAddress(i)}</p>
+      <p>${l.burned ? 'Rebuilding adds RM 400 to whatever you open here.' : 'Pick what goes behind the shutters.'}</p>
+      <h4>Open a business</h4>${GROUPS.map(([g,label]) => `<h5 class="grp">${label}</h5><div class="biz-list">${BIZ_ORDER.filter(k => BIZ[k].group === g).map(k => {
+        const d = BIZ[k], plan = payPlan(d, rebuild), can = plan.ok && (!d.respect || S.respect >= d.respect);
+        const costTxt = d.money !== 'clean' ? fmt(plan.amt) : plan.kind === 'clean' ? `${fmt(plan.amt)} clean` : `${fmt(plan.amt)} dirty`;
+        const note = d.money === 'clean' && plan.markup ? ' · no clean money: paid in dirty cash at a markup, heat +3' : '';
+        return `<button class="biz-opt" data-a="open" data-k="${k}" ${can?'':'disabled'}><span class="sw" style="background:${d.css}"></span><span><b>${d.name}</b><small>${d.blurb} ~${fmt(d.perDay)}/day · heat ${d.heat>0?'+':''}${d.heat}/day${d.respect?` · needs respect ${d.respect}`:''}${note}</small></span><span class="cost">${costTxt}</span></button>`;
+      }).join('')}</div>`).join('')}`;
+  } else {
+    const b = l.biz, def = BIZ[b.type], est = estDaily(l), closed = isClosed(b);
+    const slots = slotsOf(b);
+    const rows = [];
+    for (let k=0;k<slots;k++){
+      const s = b.staff[k];
+      rows.push(s ? `<li><span><span class="who">${s.name}</span><br><span class="trait"><b>${TRAITS[s.trait].label}</b> · ${TRAITS[s.trait].note} · RM ${TRAITS[s.trait].wage}/day</span></span><button class="stampbtn" data-a="fire" data-k="${s.id}">Let go</button></li>`
+                  : `<li><span class="empty">Empty chair</span><span></span></li>`);
+    }
+    const hireRows = b.staff.length < slots ? S.board.map(c => {
+      const t = TRAITS[c.trait], fee = t.wage*2;
+      return `<button class="biz-opt" data-a="hire" data-k="${c.id}" ${S.dirty<fee?'disabled':''}><span class="sw" style="background:#4b463d"></span><span><b>${c.name}</b><small>${t.label} · ${t.note} · RM ${t.wage}/day</small></span><span class="cost">${fmt(fee)}</span></button>`;
+    }).join('') : '';
+    const upCost = Math.round(def.cost*1.2);
+    const status = closed ? `<span class="stamp shut">Shut ${Math.ceil(b.closedUntil - S.t)}h</span>` : !b.staff.length ? `<span class="stamp shut">No staff</span>` : '';
+    body = `<span class="stamp you">Yours</span> ${status}<h3>${b.tier>1?'Grand ':''}${def.name}</h3><p class="addr">${lotAddress(i)}</p>
+      <p>${def.blurb}${b.undercutUntil > S.t ? ' <b>Geng Lorong is undercutting you here.</b>' : ''}</p>
+      <div class="till"><span>In the till<br><b class="num">${fmt(b.till||0)}</b> <small>of ${fmt(tillCap(b))} max</small></span><button class="stampbtn" data-a="collect" ${(b.till||0) < 1 ? 'disabled' : ''}>Collect</button></div>
+      <dl><dt>Takings, est.</dt><dd>${fmt(est.inc)}/day ${def.money==='clean'?'clean':'dirty'}</dd>
+          ${def.launder?`<dt>Launders</dt><dd>${fmt(def.launder*staffEff(b)*(1+(b.tier-1)*.5))}/day at 80%</dd>`:''}
+          <dt>Heat</dt><dd>${est.heat>=0?'+':''}${est.heat.toFixed(1)}/day</dd><dt>Best hours</dt><dd>${def.night>def.day?'night':'day'}</dd></dl>
+      <h4>Prices</h4>
+      <div class="seg" role="group" aria-label="Prices">${Object.keys(PRICE).map(p => `<button data-a="price" data-k="${p}" aria-pressed="${b.price===p}">${PRICE[p].label}</button>`).join('')}</div>
+      <p class="note" style="margin-top:6px">Cheap wins customers and turf. Steep earns more and cedes turf.</p>
+      <h4>Staff ${b.staff.length}/${slots}</h4><ul class="staff">${rows.join('')}</ul>
+      ${hireRows ? `<h4>Looking for work today</h4><p class="note">Signing fee is two days' wages.</p><div class="biz-list">${hireRows}</div>` : ''}
+      <h4>The building</h4><div class="row">
+        ${b.tier < 2 ? `<button class="stampbtn" data-a="upgrade" ${(def.money==='clean'?S.clean:S.dirty)<upCost?'disabled':''}>Take the floor upstairs · ${fmt(upCost)}</button>` : '<span class="note">Fully expanded.</span>'}
+        <button class="stampbtn red" data-a="close">Shut it down</button></div>`;
+  }
+  const html = head + body;
+  if (f._last !== html){ f.innerHTML = html; f._last = html; }
+}
+
+/* =========================================================================
+   AUDIO — original noir jazz, rain, city
+   ========================================================================= */
+const A = { ctx:null, on:true };
+const mtof = m => 440 * Math.pow(2, (m-69)/12);
+function audioInit(){
+  if (A.ctx){ if (A.ctx.state === 'suspended') A.ctx.resume(); return; }
+  const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+  const ctx = A.ctx = new AC();
+  A.master = ctx.createGain(); A.master.gain.value = .85;
+  const comp = ctx.createDynamicsCompressor(); comp.threshold.value = -16; comp.ratio.value = 3; comp.attack.value = .01; comp.release.value = .3;
+  A.master.connect(comp); comp.connect(ctx.destination);
+  A.music = ctx.createGain(); A.music.gain.value = .62; A.music.connect(A.master);
+  A.sfxBus = ctx.createGain(); A.sfxBus.gain.value = .75; A.sfxBus.connect(A.master);
+  A.amb = ctx.createGain(); A.amb.gain.value = .55; A.amb.connect(A.master);
+  // reverb (smoky room)
+  A.verb = ctx.createConvolver(); A.verb.buffer = impulse(3.4, 2.4);
+  A.verbIn = ctx.createGain(); A.verbIn.gain.value = 1; A.verbIn.connect(A.verb);
+  const verbOut = ctx.createGain(); verbOut.gain.value = .55; A.verb.connect(verbOut); verbOut.connect(A.master);
+  // lead bus with dotted-eighth delay
+  A.leadBus = ctx.createGain(); A.leadBus.gain.value = .9; A.leadBus.connect(A.music);
+  const dl = ctx.createDelay(2); dl.delayTime.value = 60/62*0.75;
+  const fb = ctx.createGain(); fb.gain.value = .26; const dlf = ctx.createBiquadFilter(); dlf.type='lowpass'; dlf.frequency.value = 1700;
+  A.leadBus.connect(dl); dl.connect(dlf); dlf.connect(fb); fb.connect(dl);
+  const dlo = ctx.createGain(); dlo.gain.value = .3; dlf.connect(dlo); dlo.connect(A.music); dlo.connect(A.verbIn);
+  const ls = ctx.createGain(); ls.gain.value = .45; A.leadBus.connect(ls); ls.connect(A.verbIn);
+  // keys bus with tremolo
+  A.keys = ctx.createGain(); A.keys.gain.value = .8; A.keys.connect(A.music);
+  const ks = ctx.createGain(); ks.gain.value = .35; A.keys.connect(ks); ks.connect(A.verbIn);
+  const trem = ctx.createOscillator(); trem.frequency.value = 4.2; const tg = ctx.createGain(); tg.gain.value = .22; trem.connect(tg); tg.connect(A.keys.gain); trem.start();
+  // drums bus
+  A.drums = ctx.createGain(); A.drums.gain.value = .9; A.drums.connect(A.music);
+  const dsd = ctx.createGain(); dsd.gain.value = .25; A.drums.connect(dsd); dsd.connect(A.verbIn);
+  // noise
+  const len = ctx.sampleRate * 4; const nb = ctx.createBuffer(1, len, ctx.sampleRate); const nd = nb.getChannelData(0);
+  for (let i=0;i<len;i++) nd[i] = Math.random()*2-1;
+  A.noise = nb;
+  // rain bed
+  const rain = ctx.createBufferSource(); rain.buffer = nb; rain.loop = true;
+  const rl = ctx.createBiquadFilter(); rl.type = 'lowpass'; rl.frequency.value = 2600;
+  const rh = ctx.createBiquadFilter(); rh.type = 'highpass'; rh.frequency.value = 380;
+  const rg = ctx.createGain(); rg.gain.value = .16; rain.connect(rl); rl.connect(rh); rh.connect(rg); rg.connect(A.amb);
+  const rain2 = ctx.createBufferSource(); rain2.buffer = nb; rain2.loop = true; rain2.playbackRate.value = .7;
+  const r2f = ctx.createBiquadFilter(); r2f.type='lowpass'; r2f.frequency.value = 280; const r2g = ctx.createGain(); r2g.gain.value = .2;
+  rain2.connect(r2f); r2f.connect(r2g); r2g.connect(A.amb);
+  rain.start(); rain2.start(.1, 1.3);
+  // sequencer
+  A.spb = 60/62; A.bar = 0; A.loop = 0; A.next = ctx.currentTime + .15;
+  A.timer = setInterval(scheduler, 90);
+  applyMute();
+}
+function impulse(dur, decay){
+  const ctx = A.ctx, len = Math.floor(ctx.sampleRate*dur), b = ctx.createBuffer(2, len, ctx.sampleRate);
+  for (let c=0;c<2;c++){ const d = b.getChannelData(c); for (let i=0;i<len;i++) d[i] = (Math.random()*2-1) * Math.pow(1-i/len, decay); }
+  return b;
+}
+function noiseSrc(t, dur, rate=1){
+  const s = A.ctx.createBufferSource(); s.buffer = A.noise; s.playbackRate.value = rate;
+  s.start(t, Math.random()*3); s.stop(t + dur + .05); return s;
+}
+function env(g, t, a, peak, d, sus, rel, end){
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(peak, t + a);
+  g.gain.setTargetAtTime(sus, t + a, d);
+  g.gain.setValueAtTime(sus, end); g.gain.setTargetAtTime(0, end, rel);
+}
+
+// ---- instruments ----
+function bass(t, m, dur, vel){
+  const c = A.ctx, f = mtof(m);
+  const o = c.createOscillator(); o.type = 'triangle'; o.frequency.setValueAtTime(f*1.012, t); o.frequency.exponentialRampToValueAtTime(f, t+.05);
+  const o2 = c.createOscillator(); o2.type = 'sine'; o2.frequency.value = f;
+  const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.setValueAtTime(950, t); lp.frequency.exponentialRampToValueAtTime(320, t+.3);
+  const g = c.createGain(); env(g, t, .008, .42*vel, .18, .16*vel, .05, t+dur);
+  o.connect(lp); o2.connect(lp); lp.connect(g); g.connect(A.music);
+  o.start(t); o2.start(t); o.stop(t+dur+.4); o2.stop(t+dur+.4);
+}
+function epiano(t, m, dur, vel){
+  const c = A.ctx, f = mtof(m);
+  const car = c.createOscillator(); car.frequency.value = f;
+  const mod = c.createOscillator(); mod.frequency.value = f;
+  const mg = c.createGain(); mg.gain.setValueAtTime(f*1.8*vel, t); mg.gain.exponentialRampToValueAtTime(f*.12+1, t+.6);
+  mod.connect(mg); mg.connect(car.frequency);
+  const tine = c.createOscillator(); tine.frequency.value = f*4.02; const tg = c.createGain();
+  tg.gain.setValueAtTime(.05*vel, t); tg.gain.exponentialRampToValueAtTime(.0001, t+.25);
+  const g = c.createGain(); env(g, t, .006, .16*vel, .7, .07*vel, .25, t+dur);
+  car.connect(g); tine.connect(tg); tg.connect(g); g.connect(A.keys);
+  [car,mod,tine].forEach(o => { o.start(t); o.stop(t+dur+1.2); });
+}
+function lead(t, m, dur, vel){
+  const c = A.ctx, f = mtof(m);
+  const o1 = c.createOscillator(); o1.type = 'sawtooth';
+  const o2 = c.createOscillator(); o2.type = 'square';
+  const o3 = c.createOscillator(); o3.type = 'sine';
+  [o1,o2].forEach(o => { o.frequency.setValueAtTime(f*.965, t); o.frequency.linearRampToValueAtTime(f, t+.07); });
+  o2.detune.value = 6; o3.frequency.value = f;
+  const g2 = c.createGain(); g2.gain.value = .35; const g3 = c.createGain(); g3.gain.value = .5;
+  const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 2.2;
+  lp.frequency.setValueAtTime(480, t); lp.frequency.linearRampToValueAtTime(900 + 1600*vel, t+.09); lp.frequency.setTargetAtTime(1150, t+.12, .4);
+  const pk = c.createBiquadFilter(); pk.type = 'peaking'; pk.frequency.value = 1250; pk.Q.value = 1.2; pk.gain.value = 5;
+  const g = c.createGain(); env(g, t, .07, .2*vel, .3, .15*vel, .09, t+dur);
+  // vibrato, delayed
+  if (dur > .5){
+    const lfo = c.createOscillator(); lfo.frequency.value = 5.1; const lg = c.createGain();
+    lg.gain.setValueAtTime(0, t); lg.gain.linearRampToValueAtTime(0, t+.28); lg.gain.linearRampToValueAtTime(f*.008, t+Math.min(dur,.9));
+    lfo.connect(lg); lg.connect(o1.frequency); lg.connect(o2.frequency); lg.connect(o3.frequency);
+    lfo.start(t); lfo.stop(t+dur+.5);
+  }
+  // breath
+  const n = noiseSrc(t, dur+.2); const bp = c.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value = 1900; bp.Q.value = .9;
+  const ng = c.createGain(); env(ng, t, .04, .06*vel, .12, .015*vel, .06, t+dur);
+  n.connect(bp); bp.connect(ng); ng.connect(lp);
+  o1.connect(lp); o2.connect(g2); g2.connect(lp); o3.connect(g3); g3.connect(lp); lp.connect(pk); pk.connect(g); g.connect(A.leadBus);
+  [o1,o2,o3].forEach(o => { o.start(t); o.stop(t+dur+.6); });
+}
+function brush(t, dur, vel){
+  const c = A.ctx, n = noiseSrc(t, dur);
+  const bp = c.createBiquadFilter(); bp.type='bandpass'; bp.frequency.setValueAtTime(2600,t); bp.frequency.linearRampToValueAtTime(4200, t+dur); bp.Q.value = .6;
+  const g = c.createGain(); g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(.045*vel, t+dur*.45); g.gain.linearRampToValueAtTime(0, t+dur);
+  n.connect(bp); bp.connect(g); g.connect(A.drums);
+}
+function tap(t, vel){
+  const c = A.ctx, n = noiseSrc(t, .2);
+  const hp = c.createBiquadFilter(); hp.type='bandpass'; hp.frequency.value = 2400; hp.Q.value = .7;
+  const g = c.createGain(); g.gain.setValueAtTime(.12*vel, t); g.gain.exponentialRampToValueAtTime(.001, t+.16);
+  n.connect(hp); hp.connect(g); g.connect(A.drums);
+}
+function ride(t, vel){
+  const c = A.ctx, n = noiseSrc(t, .5, 1.3);
+  const hp = c.createBiquadFilter(); hp.type='highpass'; hp.frequency.value = 6500;
+  const bp = c.createBiquadFilter(); bp.type='peaking'; bp.frequency.value = 9000; bp.gain.value = 6;
+  const g = c.createGain(); g.gain.setValueAtTime(.05*vel, t); g.gain.exponentialRampToValueAtTime(.001, t+.42);
+  n.connect(hp); hp.connect(bp); bp.connect(g); g.connect(A.drums);
+}
+function kick(t, vel){
+  const c = A.ctx, o = c.createOscillator(); o.frequency.setValueAtTime(68,t); o.frequency.exponentialRampToValueAtTime(42, t+.18);
+  const g = c.createGain(); g.gain.setValueAtTime(.2*vel, t); g.gain.exponentialRampToValueAtTime(.001, t+.3);
+  o.connect(g); g.connect(A.drums); o.start(t); o.stop(t+.35);
+}
+function crackle(t0, span){
+  const c = A.ctx;
+  for (let i=0;i<10;i++){
+    const t = t0 + Math.random()*span, n = noiseSrc(t, .004);
+    const hp = c.createBiquadFilter(); hp.type='highpass'; hp.frequency.value = 2200;
+    const g = c.createGain(); g.gain.setValueAtTime(rnd(.01,.06), t); g.gain.exponentialRampToValueAtTime(.0001, t+.006);
+    n.connect(hp); hp.connect(g); g.connect(A.music);
+  }
+}
+
+// ---- the tune: "Jalan Raja Bot, 3 a.m." (original, D minor, 62 bpm, swung) ----
+const DM7  = { r:38, v:[53,57,61,64], t:[41,45,49] };
+const DMI  = { r:38, v:[53,57,60,64], t:[41,45,48] };
+const GM7  = { r:43, v:[53,57,58,62], t:[46,50,53] };
+const C9   = { r:36, v:[52,58,62,67], t:[40,43,46] };
+const FMA  = { r:41, v:[57,60,64,67], t:[45,48,52] };
+const BBMA = { r:34, v:[57,62,65,69], t:[38,41,45] };
+const EHD  = { r:40, v:[55,58,62,64], t:[43,46,50] };
+const A7B9 = { r:33, v:[55,58,61,64], t:[37,40,43] };
+const GM6  = { r:43, v:[58,62,64,67], t:[46,50,52] };
+const DM6  = { r:38, v:[53,57,59,62], t:[41,45,47] };
+const FORM = [DM7,DMI,GM7,C9, FMA,BBMA,EHD,A7B9, DM7,DMI,GM7,GM6, EHD,A7B9,DM6,A7B9];
+const MEL = [
+  [[1,.5,69,.8],[1.5,.5,67,.6],[2,2,65,.75]],
+  [[0,2,64,.7],[2.5,.5,65,.6],[3,1,69,.8]],
+  [[0,1.5,70,.9],[1.5,.5,69,.6],[2,2,65,.7]],
+  [[0,1,64,.7],[1,1,67,.7],[2,1,70,.8],[3,1,69,.7]],
+  [[0,2.5,69,.85],[3,.5,67,.6],[3.5,.5,69,.7]],
+  [[0,2,74,1],[2,1,72,.8],[3,1,69,.7]],
+  [[0,1.5,70,.85],[1.5,.5,67,.6],[2,2,64,.7]],
+  [[0,1,61,.7],[1,1,64,.7],[2,1,67,.75],[3,1,70,.85]],
+  [[0,3,73,.9],[3,.5,74,.7],[3.5,.5,72,.65]],
+  [[0,2,69,.8],[2,1,65,.7],[3,1,62,.7]],
+  [[.5,.5,62,.6],[1,.5,65,.65],[1.5,.5,67,.7],[2,2,70,.85]],
+  [[0,1,69,.75],[1,1,67,.7],[2,2,64,.7]],
+  [[0,1,67,.75],[1,1,70,.8],[2,1,74,.95],[3,1,72,.75]],
+  [[0,2,70,.85],[2,1,69,.7],[3,1,67,.7]],
+  [[0,1.5,64,.75],[1.5,2.5,62,.7]],
+  [[2,1,61,.6],[3,1,64,.65]],
+];
+const swingPos = x => { const b = Math.floor(x), fr = x - b; return b + (fr === .5 ? .64 : fr); };
+function scheduler(){
+  const c = A.ctx; if (!c) return;
+  while (A.next < c.currentTime + .7){
+    playBar(A.bar, A.next);
+    A.next += 4*A.spb; A.bar = (A.bar + 1) % 16; if (A.bar === 0) A.loop++;
+  }
+}
+function playBar(b, t0){
+  const spb = A.spb, ch = FORM[b], nx = FORM[(b+1)%16];
+  const at = x => t0 + swingPos(x)*spb;
+  const heat = S ? S.heat/100 : 0;
+  // bass: walking line with a chromatic approach
+  const appr = nx.r + (b % 2 ? -1 : 1);
+  const walk = b % 4 === 3 ? [ch.r, ch.t[1], ch.t[0], appr] : [ch.r, ch.t[0], ch.t[1], appr];
+  walk.forEach((m,k) => bass(at(k), m, spb*.92, k===0 ? 1 : .8));
+  if (b % 4 === 1) bass(at(3.5), walk[3], spb*.4, .5);
+  // comping
+  const comp = (b % 2 === 0) ? [[0,2.2,.55],[2.5,.6,.35]] : [[1.5,.6,.4],[3.5,1.6,.45]];
+  comp.forEach(([x,d,v]) => ch.v.forEach((m,k) => epiano(at(x) + k*.012, m, d*spb, v)));
+  // brushes & ride
+  [0,1,1.5,2,3,3.5].forEach(x => ride(at(x), (x===1||x===3) ? 1 : .6));
+  for (let k=0;k<4;k++) brush(at(k), spb*.95, k%2 ? 1 : .7);
+  tap(at(1), .6); tap(at(3), .7); kick(at(0), .5); kick(at(2), .35);
+  crackle(t0, 4*spb);
+  // melody: alternate loops drop an octave and get softer; heat thins it out
+  const intro = A.loop === 0 && b < 2;
+  if (!intro){
+    const oct = A.loop % 2 ? -12 : 0, mvel = (A.loop % 2 ? .75 : 1) * (1 - heat*.45);
+    MEL[b].forEach(([x,d,m,v]) => lead(at(x), m + oct, d*spb*.94, v*mvel));
+  }
+}
+function applyMute(){
+  if (!A.ctx) return;
+  A.music.gain.setTargetAtTime(A.on ? .62 : 0, A.ctx.currentTime, .3);
+}
+
+// ---- sound effects ----
+const sfx = {
+  ok(){ return A.ctx && A.ctx.state === 'running'; },
+  click(){ if(!this.ok())return; const c=A.ctx,t=c.currentTime,n=noiseSrc(t,.03); const f=c.createBiquadFilter(); f.type='bandpass'; f.frequency.value=3000; const g=c.createGain(); g.gain.setValueAtTime(.12,t); g.gain.exponentialRampToValueAtTime(.001,t+.04); n.connect(f); f.connect(g); g.connect(A.sfxBus); },
+  key(){ if(!this.ok())return; const c=A.ctx,t=c.currentTime,n=noiseSrc(t,.04); const f=c.createBiquadFilter(); f.type='bandpass'; f.frequency.value=rnd(1500,2600); f.Q.value=2; const g=c.createGain(); g.gain.setValueAtTime(rnd(.08,.16),t); g.gain.exponentialRampToValueAtTime(.001,t+.035); n.connect(f); f.connect(g); g.connect(A.sfxBus); },
+  cash(){ if(!this.ok())return; const c=A.ctx,t=c.currentTime; [1568,2093,2637].forEach((fr,k)=>{ const o=c.createOscillator(); o.type='triangle'; o.frequency.value=fr; const g=c.createGain(); g.gain.setValueAtTime(0,t+k*.06); g.gain.linearRampToValueAtTime(.07,t+k*.06+.005); g.gain.exponentialRampToValueAtTime(.001,t+k*.06+.5); o.connect(g); g.connect(A.sfxBus); g.connect(A.verbIn); o.start(t+k*.06); o.stop(t+k*.06+.6); }); this.click(); },
+  thud(){ if(!this.ok())return; const c=A.ctx,t=c.currentTime,o=c.createOscillator(); o.frequency.setValueAtTime(90,t); o.frequency.exponentialRampToValueAtTime(40,t+.2); const g=c.createGain(); g.gain.setValueAtTime(.4,t); g.gain.exponentialRampToValueAtTime(.001,t+.35); o.connect(g); g.connect(A.sfxBus); o.start(t); o.stop(t+.4); },
+  paper(){ if(!this.ok())return; const c=A.ctx,t=c.currentTime,n=noiseSrc(t,.5); const f=c.createBiquadFilter(); f.type='bandpass'; f.frequency.setValueAtTime(1200,t); f.frequency.linearRampToValueAtTime(4500,t+.35); const g=c.createGain(); g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(.18,t+.08); g.gain.exponentialRampToValueAtTime(.001,t+.45); n.connect(f); f.connect(g); g.connect(A.sfxBus); this.thud(); },
+  thunder(delay=1, big=1){ if(!this.ok())return; const c=A.ctx,t=c.currentTime+delay,n=noiseSrc(t,5,.5); const f=c.createBiquadFilter(); f.type='lowpass'; f.frequency.value=170; const g=c.createGain(); g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(.9*big,t+.15); g.gain.setTargetAtTime(.35*big,t+.3,.4); g.gain.setTargetAtTime(0,t+1.2,1.1); n.connect(f); f.connect(g); g.connect(A.amb); g.connect(A.verbIn);
+    const n2=noiseSrc(t,.4); const f2=c.createBiquadFilter(); f2.type='highpass'; f2.frequency.value=700; const g2=c.createGain(); g2.gain.setValueAtTime(.12*big,t); g2.gain.exponentialRampToValueAtTime(.001,t+.35); n2.connect(f2); f2.connect(g2); g2.connect(A.amb); },
+  siren(){ if(!this.ok())return; const c=A.ctx,t=c.currentTime,o=c.createOscillator(); o.type='sawtooth'; for(let k=0;k<12;k++) o.frequency.setValueAtTime(k%2?880:660,t+k*.45); const f=c.createBiquadFilter(); f.type='lowpass'; f.frequency.value=1500; const g=c.createGain(); g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(.05,t+.8); g.gain.setValueAtTime(.05,t+4.2); g.gain.linearRampToValueAtTime(0,t+5.4); o.connect(f); f.connect(g); g.connect(A.sfxBus); g.connect(A.verbIn); o.start(t); o.stop(t+5.5); },
+  fire(){ if(!this.ok())return; const c=A.ctx,t=c.currentTime; const n=noiseSrc(t,4); const f=c.createBiquadFilter(); f.type='lowpass'; f.frequency.setValueAtTime(300,t); f.frequency.linearRampToValueAtTime(1400,t+.6); const g=c.createGain(); g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(.35,t+.25); g.gain.setTargetAtTime(0,t+1.4,.9); n.connect(f); f.connect(g); g.connect(A.sfxBus);
+    for(let k=0;k<26;k++){ const tt=t+.2+Math.random()*3.2, m=noiseSrc(tt,.02); const h=c.createBiquadFilter(); h.type='highpass'; h.frequency.value=1500; const gg=c.createGain(); gg.gain.setValueAtTime(rnd(.04,.12),tt); gg.gain.exponentialRampToValueAtTime(.001,tt+.03); m.connect(h); h.connect(gg); gg.connect(A.sfxBus);} },
+};
+
+/* ---------- narrator (browser speech, optional) ---------- */
+let narrate = false;
+function speak(text){
+  if (!narrate || !('speechSynthesis' in window)) return;
+  try{
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text); u.rate = .86; u.pitch = .55; u.volume = .9;
+    const v = speechSynthesis.getVoices().find(v => /en-GB/i.test(v.lang) && /male|daniel|arthur|george/i.test(v.name)) || speechSynthesis.getVoices().find(v => /^en/i.test(v.lang));
+    if (v) u.voice = v;
+    speechSynthesis.speak(u);
+  }catch(e){}
+}
+
+/* =========================================================================
+   VOICE-OVERS — every spoken line has a stable ID; recordings import by file name
+   ========================================================================= */
+const VO = { db:null, have:new Set(), urls:{}, audio:null, queue:[], voiceOn:false, index:null };
+const VO_EXT = /\.(mp3|wav|ogg|oga|m4a|aac|flac|webm)$/i;
+const NARR_EXTRA = [
+  'Blue and red on wet tarmac. Somebody talked. Somebody always talks.',
+  'Petrol and a match. Mat Botak never was subtle.',
+  'Another door, another back room. The neon said open. The ledger said more.',
+  'You don\'t argue with a man about his shop. You argue with the shop.',
+  'Money talks. Clean money talks in a nicer voice.',
+  'Some lines even I won\'t cross. One phone call, no name, and Mat Botak\'s week got a lot worse.',
+];
+function hash8(s){ let h = 0x811c9dc5; for (let i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16).padStart(8,'0'); }
+function narrId(text){ return 'nar_' + hash8(text); }
+// one row per spoken line: { id, speaker, scene, text, kind }
+function voIndex(){
+  if (VO.index) return VO.index;
+  const rows = [], seen = new Set();
+  const add = (id, kind, speaker, scene, text) => { if (!text || /\{/.test(text) || seen.has(id)) return; seen.add(id); rows.push({ id, kind, speaker, scene, text }); };
+  [['prologue',PROLOGUE,'Prologue'],['act1_end',ACT_END,'End of Act I'],['fall',FALL,'The fall']].forEach(([, panels, label]) =>
+    panels.forEach((p, i) => add(p.id, 'nar', 'Narrator', `${label}, panel ${i+1}`, p.text)));
+  NARR_EXTRA.forEach(t => add(narrId(t), 'nar', 'Narrator', 'Vignette', t));
+  const npc = (scene, t) => add('npc_' + hash8(t), 'npc', 'Bystander', scene, t);
+  Object.entries(TYPE_LINES).forEach(([k, a]) => a.forEach(t => npc(`Passing: ${BIZ[k] ? BIZ[k].name.toLowerCase() : k}`, t)));
+  Object.entries(OWNER_LINES).forEach(([k, a]) => a.forEach(t => npc(`Owner: ${k === 'you' ? 'your crew' : 'Geng Lorong'}`, t)));
+  HEAT_LINES.forEach((a, k) => a.forEach(t => npc(`Heat: ${HEAT_LEVELS[k].toLowerCase()}`, t)));
+  Object.entries(PHASE_LINES).forEach(([k, a]) => a.forEach(t => npc(`Time of day: ${k}`, t)));
+  Object.entries(TURF_LINES).forEach(([k, a]) => a.forEach(t => npc(`Turf: ${k}`, t)));
+  Object.entries(TEMPERS).forEach(([, T]) => { T.lines.concat([T.you, T.rival]).forEach(t => npc(`Temperament: ${T.label.toLowerCase()}`, t)); });
+  JOBS.forEach(J => J.lines.forEach(t => npc(`Job: ${J.job}`, t)));
+  SECRETS.forEach(s => npc('Secret', s.text));
+  VO.index = rows; VO.byText = new Map(rows.map(r => [r.text, r])); VO.npcSorted = rows.filter(r => r.kind === 'npc').sort((a,b) => b.text.length - a.text.length);
+  return rows;
+}
+function voValidKeys(){
+  const keys = new Set();
+  voIndex().forEach(r => { keys.add(r.id); if (r.kind === 'npc'){ keys.add(r.id + '__m'); keys.add(r.id + '__f'); } });
+  return keys;
+}
+function csvCell(v){ return '"' + String(v).replace(/"/g, '""') + '"'; }
+function voScriptCSV(){
+  const out = [['id','file','speaker','scene','text','notes'].join(',')];
+  voIndex().forEach(r => out.push([r.id, r.kind === 'npc' ? `${r.id}__m.mp3 | ${r.id}__f.mp3` : `${r.id}.mp3`, r.speaker, r.scene, r.text,
+    r.kind === 'npc' ? 'Record a male and a female take if you can; a single file named id.mp3 is used for everyone' : ''].map(csvCell).join(',')));
+  return out.join('\n');
+}
+function voManifest(){
+  return JSON.stringify({ version:1, folder:'assets/vo', lines: voIndex().map(r => ({ id:r.id, speaker:r.speaker, scene:r.scene, text:r.text,
+    files: r.kind === 'npc' ? [`${r.id}__m.mp3`, `${r.id}__f.mp3`, `${r.id}.mp3`] : [`${r.id}.mp3`] })) }, null, 2);
+}
+
+// storage: recordings live in this browser (IndexedDB); in the repo they ship as assets/vo/<id>.mp3
+function voOpen(){ return new Promise((res, rej) => { try{ const r = indexedDB.open('kotahitam-vo', 1); r.onupgradeneeded = () => r.result.createObjectStore('clips'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }catch(e){ rej(e); } }); }
+async function voInit(){
+  try{ VO.db = await voOpen(); const req = VO.db.transaction('clips').objectStore('clips').getAllKeys(); req.onsuccess = () => req.result.forEach(k => VO.have.add(k)); }
+  catch(e){ VO.db = null; }
+}
+function voGet(key){
+  return new Promise(res => {
+    if (VO.urls[key]) return res(VO.urls[key]);
+    if (!VO.db || !VO.have.has(key)) return res(null);
+    try{ const r = VO.db.transaction('clips').objectStore('clips').get(key);
+      r.onsuccess = () => { if (r.result){ VO.urls[key] = URL.createObjectURL(r.result); res(VO.urls[key]); } else res(null); }; r.onerror = () => res(null); }
+    catch(e){ res(null); }
+  });
+}
+function voPut(key, blob){
+  return new Promise(res => {
+    try{ const tx = VO.db.transaction('clips', 'readwrite'); tx.objectStore('clips').put(blob, key);
+      tx.oncomplete = () => { VO.have.add(key); if (VO.urls[key]){ URL.revokeObjectURL(VO.urls[key]); delete VO.urls[key]; } res(true); }; tx.onerror = () => res(false); }
+    catch(e){ res(false); }
+  });
+}
+function voClear(){
+  return new Promise(res => { try{ const tx = VO.db.transaction('clips', 'readwrite'); tx.objectStore('clips').clear(); tx.oncomplete = () => { VO.have.clear(); Object.values(VO.urls).forEach(u => URL.revokeObjectURL(u)); VO.urls = {}; res(true); }; }catch(e){ res(false); } });
+}
+
+// playback
+function duck(on){ if (A.ctx && A.music) A.music.gain.setTargetAtTime(on ? .18 : (A.on ? .62 : 0), A.ctx.currentTime, .25); }
+function voStop(){ VO.queue = []; if (VO.audio){ VO.audio.onended = null; VO.audio.pause(); VO.audio = null; } duck(false); }
+function voPlay(keys){ voStop(); VO.queue = keys.slice(); voNext(); }
+async function voNext(){
+  const k = VO.queue.shift(); if (!k){ VO.audio = null; duck(false); return; }
+  const url = await voGet(k); if (!url) return voNext();
+  const a = new Audio(url); VO.audio = a; duck(true); a.onended = voNext; a.play().catch(() => voNext());
+}
+// narrator: a recording if one exists, otherwise browser speech when the narrator toggle is on
+function narratePanel(p){
+  voIndex();
+  const id = p.id || narrId(p.text);
+  try{ speechSynthesis.cancel(); }catch(e){}
+  if (VO.have.has(id)){ voPlay([id]); return; }
+  voStop(); speak(p.text);
+}
+// bystanders: stitch recorded fragments; fall back to browser speech in a voice that fits the speaker
+function voiceBystander(w, text){
+  if (!VO.voiceOn || !text) return;
+  voIndex();
+  const P = w.profile, g = P.gender, parts = [];
+  let rest = text;
+  for (const r of VO.npcSorted){ const i = rest.indexOf(r.text); if (i >= 0){ parts.push([text.indexOf(r.text), r.id]); rest = rest.slice(0, i) + '\u0000'.repeat(r.text.length) + rest.slice(i + r.text.length); } }
+  const keys = parts.sort((a,b) => a[0]-b[0]).map(([,id]) => VO.have.has(`${id}__${g}`) ? `${id}__${g}` : VO.have.has(id) ? id : null).filter(Boolean);
+  try{ speechSynthesis.cancel(); }catch(e){}
+  if (keys.length && keys.length === parts.length){ voPlay(keys); return; }
+  voStop();
+  if (!('speechSynthesis' in window)) return;
+  try{
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = P.age > 60 ? .82 : P.temper === 'nervous' ? 1.08 : .95;
+    u.pitch = (g === 'f' ? 1.15 : .75) * (P.age > 60 ? .9 : 1); u.volume = .85;
+    const vs = speechSynthesis.getVoices().filter(v => /^en/i.test(v.lang));
+    const pref = vs.filter(v => /MY|SG|IN/i.test(v.lang)), pool = pref.length ? pref : vs;
+    if (pool.length) u.voice = pool[(P.name.length + P.age) % pool.length];
+    speechSynthesis.speak(u);
+  }catch(e){}
+}
+
+// the recording booth
+async function importFiles(files){
+  if (!VO.db){ return { ok:0, bad:[], err:'This browser blocked local storage, so recordings can\'t be kept here.' }; }
+  const valid = voValidKeys(); let ok = 0; const bad = [], replaced = [];
+  for (const f of files){
+    if (!VO_EXT.test(f.name)){ bad.push(f.name + ' (not an audio file)'); continue; }
+    const key = f.name.replace(VO_EXT, '').toLowerCase();
+    if (!valid.has(key)){ bad.push(f.name + ' (no line with that ID)'); continue; }
+    if (VO.have.has(key)) replaced.push(key);
+    if (await voPut(key, f)) ok++; else bad.push(f.name + ' (could not be saved)');
+  }
+  return { ok, bad, replaced };
+}
+function boothHTML(msg){
+  const rows = voIndex(), nar = rows.filter(r => r.kind === 'nar'), npc = rows.filter(r => r.kind === 'npc');
+  const recNar = nar.filter(r => VO.have.has(r.id)).length;
+  const recNpc = npc.filter(r => VO.have.has(r.id) || VO.have.has(r.id + '__m') || VO.have.has(r.id + '__f')).length;
+  return `<article class="choice booth" role="dialog" aria-label="Recording booth">
+    <div class="kick">Recording booth · voice-overs</div>
+    <h2>${rows.length} spoken lines, ${recNar + recNpc} recorded</h2>
+    <p class="note">Narrator ${recNar}/${nar.length} · bystanders ${recNpc}/${npc.length}. Recordings replace browser speech wherever they exist. They are stored in this browser; in the repo they ship as <code>assets/vo/&lt;id&gt;.mp3</code>.</p>
+    <ol class="steps">
+      <li><b>Send the script to your actors.</b> Every line has an ID and a file name to save the take as.
+        <div class="row"><button class="stampbtn" data-b="csv">Copy recording script (CSV)</button><button class="stampbtn" data-b="json">Copy manifest (JSON)</button></div>
+        <details><summary>Show the script</summary><textarea id="voScript" readonly rows="6">${voScriptCSV().replace(/&/g,'&amp;').replace(/</g,'&lt;')}</textarea></details></li>
+      <li><b>Drop the recordings in.</b> File names decide where each take goes: <code>cs_prologue_01.mp3</code>, <code>nar_…mp3</code>, or <code>npc_…__m.mp3</code> / <code>npc_…__f.mp3</code>. MP3, WAV, OGG, M4A, AAC, FLAC and WebM all work.
+        <label class="drop" id="voDrop" for="voFiles">Drop audio files or a whole folder here<br><small>or click to choose files</small></label>
+        <input type="file" id="voFiles" multiple accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac,.webm" hidden>
+        <div class="row"><label class="stampbtn" for="voFolder">Choose a folder</label><input type="file" id="voFolder" webkitdirectory multiple hidden></div></li>
+    </ol>
+    ${msg ? `<div class="voMsg">${msg}</div>` : ''}
+    <h4>Narrator lines</h4>
+    <ul class="voList">${nar.map(r => `<li><span class="st ${VO.have.has(r.id) ? 'on' : ''}">${VO.have.has(r.id) ? 'Recorded' : 'Missing'}</span><span><code>${r.id}</code> · ${r.scene}<br><small>${r.text.replace(/</g,'&lt;')}</small></span>${VO.have.has(r.id) ? `<button class="stampbtn" data-b="play" data-k="${r.id}">Play</button>` : '<span></span>'}</li>`).join('')}</ul>
+    <div class="foot"><button class="stampbtn red" data-b="clear">${VO.confirmClear ? 'Really delete all recordings?' : 'Delete all recordings'}</button><button class="stampbtn" data-b="close">Close the booth</button></div>
+  </article>`;
+}
+function showBooth(msg){
+  const el = $('paper'); el.innerHTML = boothHTML(msg); el.hidden = false;
+  if (!VO.boothOpen){ VO.boothOpen = true; VO.wasSpeed = speed; setSpeed(0, true); }
+  const take = async files => { const r = await importFiles([...files]);
+    const parts = [];
+    if (r.err) parts.push(r.err);
+    parts.push(`Imported ${r.ok} recording${r.ok === 1 ? '' : 's'}${r.replaced && r.replaced.length ? `, ${r.replaced.length} replacing older takes` : ''}.`);
+    if (r.bad.length) parts.push(`Skipped ${r.bad.length}: ${r.bad.slice(0,6).join('; ')}${r.bad.length > 6 ? '…' : ''}`);
+    showBooth(parts.join(' ')); };
+  $('voFiles').onchange = e => take(e.target.files);
+  $('voFolder').onchange = e => take(e.target.files);
+  const drop = $('voDrop');
+  drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+  drop.ondragleave = () => drop.classList.remove('over');
+  drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); take(e.dataTransfer.files); };
+  el.onclick = async e => {
+    const b = e.target.closest('[data-b]'); if (!b) return;
+    const k = b.dataset.b;
+    if (k === 'csv' || k === 'json'){
+      const text = k === 'csv' ? voScriptCSV() : voManifest();
+      try{ await navigator.clipboard.writeText(text); b.textContent = 'Copied'; }
+      catch(err){ const ta = $('voScript'); ta.value = text; ta.closest('details').open = true; ta.select(); b.textContent = 'Select and copy below'; }
+    }
+    if (k === 'play') voPlay([b.dataset.k]);
+    if (k === 'clear'){ if (!VO.confirmClear){ VO.confirmClear = true; showBooth(); } else { VO.confirmClear = false; await voClear(); showBooth('All recordings deleted.'); } }
+    if (k === 'close'){ voStop(); VO.confirmClear = false; el.hidden = true; el.onclick = null; VO.boothOpen = false; if (S) setSpeed(VO.wasSpeed || 1, true); }
+  };
+}
+
+/* =========================================================================
+   WEBGL CITY — isometric inked toon district (Tapped Out-style board)
+   ========================================================================= */
+const G = { overlays:[] };
+const LOOK = { colour:false };
+function mulberry(a){ return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function canvasTex(w, h, draw){
+  const c = document.createElement('canvas'); c.width = w; c.height = h; draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c); t.anisotropy = 4; return t;
+}
+const texCache = {};
+function signTex(type, vertical){
+  const key = type + (vertical ? 'v' : 'h'); if (texCache[key]) return texCache[key];
+  const def = type === 'sale' ? { vert:'DIJUAL', horiz:'DIJUAL · FOR SALE' } : BIZ[type];
+  const text = vertical ? def.vert : def.horiz;
+  return texCache[key] = canvasTex(vertical ? 64 : 512, vertical ? 256 : 112, (g,w,h) => {
+    g.fillStyle = '#000'; g.fillRect(0,0,w,h);
+    g.strokeStyle = '#fff'; g.lineWidth = 4; g.globalAlpha = .6; g.strokeRect(6,6,w-12,h-12); g.globalAlpha = 1;
+    g.fillStyle = '#fff'; g.shadowColor = '#fff'; g.shadowBlur = 10; g.textAlign = 'center'; g.textBaseline = 'middle';
+    if (vertical){
+      const chars = [...text]; const step = (h-30)/chars.length; const fs = Math.min(46, step*.9);
+      g.font = `bold ${fs}px "Noto Serif CJK SC","Songti SC","SimSun",Georgia,serif`;
+      chars.forEach((ch,k) => g.fillText(ch, w/2, 15 + step*(k+.5)));
+    } else {
+      g.font = `bold 52px "Noto Serif CJK SC","Songti SC",Georgia,serif`;
+      g.fillText(text, w/2, h/2+3, w-36);
+    }
+  });
+}
+function radialTex(){
+  return canvasTex(128,128,(g,w,h)=>{ const gr = g.createRadialGradient(64,64,0,64,64,64); gr.addColorStop(0,'rgba(255,255,255,1)'); gr.addColorStop(.4,'rgba(255,255,255,.35)'); gr.addColorStop(1,'rgba(255,255,255,0)'); g.fillStyle = gr; g.fillRect(0,0,w,h); });
+}
+function streakTex(){
+  return canvasTex(64,256,(g,w,h)=>{
+    for (let k=0;k<26;k++){ const x = Math.random()*w, a = Math.random()*.5+.15; const gr = g.createLinearGradient(0,0,0,h); gr.addColorStop(0,`rgba(255,255,255,${a})`); gr.addColorStop(1,'rgba(255,255,255,0)'); g.fillStyle = gr; g.fillRect(x,0,1+Math.random()*3,h*(.5+Math.random()*.5)); }
+  });
+}
+function bubbleTex(){
+  return canvasTex(128,128,(g)=>{
+    g.fillStyle = '#000'; g.beginPath(); g.arc(64,56,50,0,Math.PI*2); g.fill(); g.beginPath(); g.moveTo(50,96); g.lineTo(64,126); g.lineTo(78,96); g.fill();
+    g.fillStyle = '#f2ecdd'; g.beginPath(); g.arc(64,56,44,0,Math.PI*2); g.fill(); g.beginPath(); g.moveTo(55,96); g.lineTo(64,114); g.lineTo(73,96); g.fill();
+    g.fillStyle = '#e6a53e'; g.beginPath(); g.arc(64,56,31,0,Math.PI*2); g.fill(); g.strokeStyle = '#000'; g.lineWidth = 4; g.stroke();
+    g.fillStyle = '#000'; g.font = 'bold 27px Georgia, serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('RM', 64, 58);
+  });
+}
+
+const PASTEL = [0x9fd8c2,0xf2b3bf,0xf4dc95,0xa9cde9,0xcdb6e6,0xf3c39b,0xbfe3a6,0xe9e2cf];
+const matCache = {};
+function toon(color){ return matCache[color] || (matCache[color] = new THREE.MeshToonMaterial({ color, gradientMap:G.grad })); }
+function basic(color){ const k = 'b' + color; return matCache[k] || (matCache[k] = new THREE.MeshBasicMaterial({ color })); }
+function ink(mesh, t){
+  t = t == null ? .06 : t;
+  const geo = mesh.geometry; geo.computeBoundingBox(); const s = new THREE.Vector3(); geo.boundingBox.getSize(s);
+  const o = new THREE.Mesh(geo, G.inkMat); o.userData.ink = true;
+  o.scale.set(1 + 2*t/Math.max(s.x,.05), 1 + 2*t/Math.max(s.y,.05), 1 + 2*t/Math.max(s.z,.05));
+  mesh.add(o); return mesh;
+}
+function part(parent, geo, mat, x, y, z, t){ const m = new THREE.Mesh(geo, mat); m.position.set(x,y,z); if (t !== 0) ink(m, t); parent.add(m); return m; }
+function box(parent, w, h, d, color, x, y, z, t){ return part(parent, new THREE.BoxGeometry(w,h,d), typeof color === 'number' ? toon(color) : color, x, y, z, t); }
+function cyl(parent, r, h, color, x, y, z, t, seg){ return part(parent, new THREE.CylinderGeometry(r, r, h, seg || 10), typeof color === 'number' ? toon(color) : color, x, y, z, t); }
+// Merges static opaque meshes under parent (children from index `from` on) into one mesh per material.
+// Only use on parts that never move on their own; material colour changes still work.
+function bake(parent, from){
+  parent.updateWorldMatrix(true, true);
+  const inv = parent.matrixWorld.clone().invert(), byMat = new Map(), found = [];
+  parent.children.slice(from || 0).forEach(c => c.traverse(o => {
+    const g = o.geometry, ok = o.isMesh && !o.isInstancedMesh && o.visible && !Array.isArray(o.material) && !o.material.transparent;
+    if (ok && g.attributes.normal && g.attributes.uv && o.matrixWorld.determinant() > 0) found.push(o);
+  }));
+  found.forEach(o => {
+    const g = o.geometry.index ? o.geometry.toNonIndexed() : o.geometry.clone();
+    for (const name of Object.keys(g.attributes)) if (!['position','normal','uv'].includes(name)) g.deleteAttribute(name);
+    g.applyMatrix4(new THREE.Matrix4().multiplyMatrices(inv, o.matrixWorld));
+    if (!byMat.has(o.material)) byMat.set(o.material, []);
+    byMat.get(o.material).push(g);
+  });
+  found.forEach(o => { o.geometry.dispose(); o.removeFromParent(); });
+  byMat.forEach((geos, mat) => { parent.add(new THREE.Mesh(mergeGeometries(geos), mat)); geos.forEach(g => g.dispose()); });
+}
+function roofGeo(len, span, h){ const s = new THREE.Shape(); s.moveTo(-span/2,0); s.lineTo(span/2,0); s.lineTo(0,h); s.closePath(); const g = new THREE.ExtrudeGeometry(s, { depth:len, bevelEnabled:false }); g.center(); return g; }
+
+const XS = [-9.5,-4.5,4.5,9.5];
+function plotXZ(i){ if (i < 16) return { x: XS[i%4], z: XS[Math.floor(i/4)] }; const b = Math.floor((i-16)/4), k = (i-16)%4, c = BLOCKS[b].c; return { x: c[0] + (k%2 ? 2.5 : -2.5), z: c[1] + (k > 1 ? 2.5 : -2.5) }; }
+
+const SHAPES = {
+  den:    { f:2, w:3.6, d:3.3, roof:'pitch', awn:0xb3202c },
+  bola:   { f:1, w:2.8, d:2.6, roof:'flat',  awn:0x1f8f4a, kiosk:true },
+  ekor:   { f:1, w:2.6, d:2.4, roof:'flat',  awn:0xc8b02a, kiosk:true },
+  smokes: { f:1, w:3.0, d:2.6, roof:'flat',  awn:0xd2632a, stall:true },
+  fakes:  { f:1, w:3.4, d:2.8, roof:'flat',  awn:0x7a52c9, stall:true },
+  ahlong: { f:2, w:3.4, d:3.3, roof:'pitch', awn:0xb88418 },
+  bar:    { f:2, w:3.6, d:3.3, roof:'pitch', awn:0x2a62b8, barrels:true },
+  parlour:{ f:3, w:3.6, d:3.3, roof:'pitch', awn:0xc94a8c, plants:true },
+  powder: { f:2, w:3.4, d:3.3, roof:'pitch', awn:0x9c2a84 },
+  chop:   { f:1, w:4.1, d:3.4, roof:'flat',  awn:0x5f6b2a, garage:true },
+  casino: { f:4, w:4.0, d:3.6, roof:'dome',  awn:0xb8902a, bulbs:true },
+  front:  { f:2, w:3.6, d:3.0, roof:'pitch', awn:0x2f7f5f, tables:true },
+  laundry:{ f:2, w:3.6, d:3.1, roof:'flat',  awn:0x3a8fc0, portholes:true },
+};
+
+function initGL(){
+  const canvas = $('gl');
+  colTmp = new THREE.Color();
+  const R = G.renderer = new THREE.WebGLRenderer({ canvas, antialias:false, powerPreference:'high-performance' });
+  G.mobile = Math.min(innerWidth, innerHeight) < 700;
+  R.setPixelRatio(Math.min(devicePixelRatio, G.mobile ? 1.25 : 1.5));
+  R.setClearColor(0x07080b);
+  const scene = G.scene = new THREE.Scene();
+  scene.fog = new THREE.Fog(0x07080b, 150, 240);
+  G.camera = new THREE.OrthographicCamera(-10,10,10,-10,1,500);
+  G.target = new THREE.Vector3(0,0,0); G.offset = new THREE.Vector3(1,1.05,1).normalize().multiplyScalar(140); G.zoom = 1;
+
+  const gd = new Uint8Array([70,70,70,255, 135,135,135,255, 200,200,200,255, 255,255,255,255]);
+  G.grad = new THREE.DataTexture(gd, 4, 1, THREE.RGBAFormat); G.grad.minFilter = G.grad.magFilter = THREE.NearestFilter; G.grad.needsUpdate = true;
+  G.inkMat = new THREE.MeshBasicMaterial({ color:0x000000, side:THREE.BackSide });
+
+  G.hemi = new THREE.HemisphereLight(0xb8c6e0, 0x2a2622, .5); scene.add(G.hemi);
+  G.sun = new THREE.DirectionalLight(0xfff0d8, .7); G.sun.position.set(26, 44, 32); scene.add(G.sun);
+
+  G.glowTex = radialTex(); G.streakTex = streakTex(); G.bubbleTex = bubbleTex();
+  G.facadeTex = canvasTex(128,128,(g)=>{ g.fillStyle = '#fff'; g.fillRect(0,0,128,128); for (let y=14;y<120;y+=36) for (let x=14;x<120;x+=38){ g.fillStyle = '#3a3f47'; g.fillRect(x,y,22,24); g.fillStyle = '#000'; g.fillRect(x-2,y+24,26,3); } });
+  G.facadeLit = canvasTex(128,128,(g)=>{ g.fillStyle = '#000'; g.fillRect(0,0,128,128); const r = mulberry(7); for (let y=14;y<120;y+=36) for (let x=14;x<120;x+=38) if (r() < .45){ g.fillStyle = '#ffd28a'; g.fillRect(x,y,22,24); } });
+  G.plusTex = canvasTex(128,128,(g)=>{ g.fillStyle = '#000'; g.beginPath(); g.arc(64,64,56,0,Math.PI*2); g.fill(); g.fillStyle = '#e32a3d'; g.beginPath(); g.arc(64,64,48,0,Math.PI*2); g.fill(); g.fillStyle = '#fff'; g.fillRect(56,30,16,68); g.fillRect(30,56,68,16); });
+  const rand = mulberry(1987);
+  G.winPositions = [];
+
+  // ground, blocks, roads
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(400,400), toon(0x2b2d33)); ground.rotation.x = -Math.PI/2; scene.add(ground);
+  for (const bx of [-7,7]) for (const bz of [-7,7]) box(scene, 10.2, .2, 10.2, 0x77736b, bx, .1, bz, .04);
+  const dashes = [];
+  for (let k=-46; k<=46; k+=2.6){ for (const c of [0,-14,14]){ dashes.push([k,c,0]); dashes.push([c,k,Math.PI/2]); } }
+  const dm = new THREE.InstancedMesh(new THREE.PlaneGeometry(1.2,.16), basic(0xd9b43a), dashes.length);
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler(), one = new THREE.Vector3(1,1,1);
+  dashes.forEach(([x,z,r],k) => { e.set(-Math.PI/2, 0, r); q.setFromEuler(e); m4.compose(new THREE.Vector3(x,.02,z), q, one); dm.setMatrixAt(k, m4); });
+  dm.frustumCulled = false; scene.add(dm);
+  for (let k=0;k<6;k++){ for (const s of [-1,1]){
+    const a = new THREE.Mesh(new THREE.PlaneGeometry(.38,3.2), basic(0xcfcbc0)); a.rotation.x = -Math.PI/2; a.position.set(-1.6 + k*.64, .025, s*2.9); scene.add(a);
+    const b = new THREE.Mesh(new THREE.PlaneGeometry(3.2,.38), basic(0xcfcbc0)); b.rotation.x = -Math.PI/2; b.position.set(s*2.9, .025, -1.6 + k*.64); scene.add(b); } }
+
+  // the playable plots
+  G.hutMats = PASTEL.map(c => new THREE.MeshToonMaterial({ color:c, gradientMap:G.grad, map:G.facadeTex, emissive:0xffffff, emissiveMap:G.facadeLit, emissiveIntensity:.8 }));
+  G.lots = []; for (let i=0;i<LOT_COUNT;i++) G.lots.push(makePlot(i, rand));
+  G.markers = BLOCKS.map(B => { const m = new THREE.Sprite(new THREE.SpriteMaterial({ map:G.plusTex, depthTest:false, transparent:true })); m.scale.set(2.4,2.4,1); m.position.set(B.c[0], 9, B.c[1]); m.renderOrder = 11; m.visible = false; scene.add(m); return m; });
+  const preBackdrop = scene.children.length; makeBackdrop(rand); bake(scene, preBackdrop); G.towers.forEach(t => scene.add(t.g));
+
+  // backdrop windows, instanced
+  const im = new THREE.InstancedMesh(new THREE.PlaneGeometry(.42,.55), new THREE.MeshBasicMaterial({ color:0xffffff }), Math.max(1, G.winPositions.length));
+  const col = new THREE.Color();
+  G.winPositions.forEach((w,k) => {
+    q.setFromAxisAngle(new THREE.Vector3(0,1,0), w.ry); m4.compose(new THREE.Vector3(w.x,w.y,w.z), q, one); im.setMatrixAt(k, m4); w.m = m4.clone();
+    if (rand() < w.p){ const b = .45 + rand()*.6; col.setRGB(1*b, .84*b, .58*b); } else col.setRGB(.05,.055,.065);
+    im.setColorAt(k, col);
+  });
+  im.frustumCulled = false; scene.add(im); G.winMesh = im;
+
+  // street lamps at the crossroads
+  G.lamps = [];
+  [[-2.6,-2.6],[2.6,2.6],[-2.6,2.6],[2.6,-2.6],[-12.2,2.4],[12.2,-2.4],[2.4,12.2],[-2.4,-12.2]].forEach(([x,z]) => {
+    cyl(scene, .07, 3.6, 0x16171a, x, 2, z, .03, 6);
+    const head = box(scene, .5, .14, .5, basic(0xe6ecff), x, 3.85, z, .03);
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map:G.glowTex, color:0xcfdcff, transparent:true, opacity:.5, blending:THREE.AdditiveBlending, depthWrite:false })); glow.scale.set(2.4,2.4,1); glow.position.set(x,3.8,z); scene.add(glow);
+    const pool = new THREE.Mesh(new THREE.PlaneGeometry(5,5), new THREE.MeshBasicMaterial({ map:G.glowTex, color:0x8d98b4, transparent:true, opacity:.35, blending:THREE.AdditiveBlending, depthWrite:false }));
+    pool.rotation.x = -Math.PI/2; pool.position.set(x,.23,z); scene.add(pool);
+    const L = new THREE.PointLight(0xb9c8ff, .8, 10, 1.6); L.position.set(x,3.5,z); scene.add(L);
+    G.lamps.push({ glow, pool, L, head });
+  });
+
+  // rain + splashes
+  const N = G.mobile ? 1000 : 2200;
+  G.rain = { N, pos:new Float32Array(N*6), v:new Float32Array(N) };
+  for (let k=0;k<N;k++) resetDrop(k, true);
+  const rgeo = new THREE.BufferGeometry(); rgeo.setAttribute('position', new THREE.BufferAttribute(G.rain.pos,3));
+  G.rainMesh = new THREE.LineSegments(rgeo, new THREE.LineBasicMaterial({ color:0xa8b4c8, transparent:true, opacity:.3, depthWrite:false }));
+  G.rainMesh.frustumCulled = false; scene.add(G.rainMesh);
+  const SN = G.mobile ? 140 : 300; G.splash = { N:SN, pos:new Float32Array(SN*3), life:new Float32Array(SN) };
+  const sgeo = new THREE.BufferGeometry(); sgeo.setAttribute('position', new THREE.BufferAttribute(G.splash.pos,3));
+  G.splashMesh = new THREE.Points(sgeo, new THREE.PointsMaterial({ color:0xc7d2e4, size:2, sizeAttenuation:false, transparent:true, opacity:.5, depthWrite:false }));
+  G.splashMesh.frustumCulled = false; scene.add(G.splashMesh);
+
+  makeCars(); makeWalkers(rand); makePolice(); makeFire();
+
+  const sq = new THREE.EdgesGeometry(new THREE.BoxGeometry(5.2,.6,5.2));
+  G.sel = new THREE.LineSegments(sq, new THREE.LineBasicMaterial({ color:0xf3efe4, transparent:true, opacity:.9 })); G.sel.visible = false; scene.add(G.sel);
+  G.hov = new THREE.LineSegments(sq, new THREE.LineBasicMaterial({ color:0x9a9ea6, transparent:true, opacity:.6 })); G.hov.visible = false; scene.add(G.hov);
+
+  initPost();
+  resize(); addEventListener('resize', resize);
+  initInput();
+}
+
+function makePlot(i, rand){
+  const { x, z } = plotXZ(i);
+  const root = new THREE.Group(); root.position.set(x, .2, z); G.scene.add(root);
+  const ground = new THREE.Group(); root.add(ground);
+  box(ground, 4.7, .12, 4.7, 0x8e8a7f, 0, .06, 0, 0);
+  const curbMat = new THREE.MeshBasicMaterial({ color:0x55585e });
+  [[0,2.32,4.84,.16],[0,-2.32,4.84,.16],[2.32,0,.16,4.84],[-2.32,0,.16,4.84]].forEach(([cx,cz,w,d]) => { const c = new THREE.Mesh(new THREE.BoxGeometry(w,.22,d), curbMat); c.position.set(cx,.11,cz); ground.add(c); });
+  bake(ground);
+  const glowMat = new THREE.MeshBasicMaterial({ map:G.glowTex, color:0x000000, transparent:true, blending:THREE.AdditiveBlending, depthWrite:false });
+  const glow = new THREE.Mesh(new THREE.PlaneGeometry(7.5,7.5), glowMat); glow.rotation.x = -Math.PI/2; glow.position.y = .14; glow.visible = false; root.add(glow);
+  const bld = new THREE.Group(); root.add(bld);
+  const poolMat = new THREE.MeshBasicMaterial({ map:G.glowTex, color:0x000000, transparent:true, blending:THREE.AdditiveBlending, depthWrite:false });
+  const pool = new THREE.Mesh(new THREE.PlaneGeometry(4.6,3.6), poolMat); pool.rotation.x = -Math.PI/2; pool.position.set(.4,.17,1.9); pool.visible = false; root.add(pool);
+  const bubble = new THREE.Sprite(new THREE.SpriteMaterial({ map:G.bubbleTex, depthTest:false, transparent:true })); bubble.scale.set(1.6,1.6,1); bubble.visible = false; bubble.renderOrder = 10; root.add(bubble);
+  const pick = new THREE.Mesh(new THREE.BoxGeometry(5,9,5), new THREE.MeshBasicMaterial()); pick.visible = false; pick.position.y = 4.5; pick.userData.lot = i; root.add(pick);
+  const flagMat = new THREE.MeshBasicMaterial({ color:0x000000 });
+  const doorMat = new THREE.MeshBasicMaterial({ color:0x000000 });
+  return { i, x, z, root, bld, curbMat, glow, pool, glowMat, poolMat, bubble, pick, flagMat, doorMat, cur:undefined, hutMat: G.hutMats[Math.floor(rand()*G.hutMats.length)],
+           color: PASTEL[Math.floor(rand()*PASTEL.length)], seed: rand()*100, flick: rand() < .3, signMats:[], lanterns:[], top:2.4, pop:1 };
+}
+
+function clearGroup(g){ while (g.children.length){ const c = g.children.pop(); c.traverse(o => { if (o.geometry && !o.userData.ink) o.geometry.dispose(); }); } }
+function win(B, x, y, z, ry, lit){
+  const m = box(B, .55, .62, .08, basic(lit ? 0xffd28a : 0x22262c), x, y, z, .04); m.rotation.y = ry; return m;
+}
+function flagOn(V, B, x, y, z){
+  cyl(B, .04, 1.1, 0x16171a, x, y + .55, z, 0, 5);
+  const f = new THREE.Mesh(new THREE.BoxGeometry(.6,.36,.04), V.flagMat); f.position.set(x + .3, y + .9, z); f.rotation.y = Math.PI/4; ink(f, .03); B.add(f);
+}
+function buildPlot(V, l){
+  clearGroup(V.bld); V.signMats = []; V.lanterns = [];
+  const B = V.bld, type = l.biz ? l.biz.type : null, r = mulberry(Math.floor(V.seed*1000));
+  if (l.owner === 'locked'){
+    if (r() < .16){ cyl(B, .12, 1.1, 0x4a3426, -.6, .7, -.4, .03, 6); part(B, new THREE.SphereGeometry(.9, 9, 7), toon(0x3d7346), -.6, 1.85, -.4, .05);
+                    cyl(B, .1, .9, 0x4a3426, 1.1, .6, 1, .03, 6); part(B, new THREE.SphereGeometry(.7, 9, 7), toon(0x467a4e), 1.1, 1.55, 1, .05); V.top = 3; return; }
+    const hh = 2.2 + r()*3.4, w = 3.5 + r()*.6;
+    part(B, new THREE.BoxGeometry(w, hh, 3.5), V.hutMat, 0, .14 + hh/2, -.2, .06);
+    if (r() < .6){ const m = part(B, roofGeo(w + .3, 3.8, .9), toon(0x8f4a35), 0, .14 + hh + .45, -.2, .05); m.rotation.y = Math.PI/2; }
+    else box(B, w + .14, .2, 3.64, 0x4f4b46, 0, .14 + hh + .1, -.2, .03);
+    V.top = hh + 1.6; return;
+  }
+  if (!type){
+    if (l.burned){
+      box(B, 3.4, 1.5, 3.1, 0x1b1714, 0, .9, -.3);
+      box(B, 1.4, .9, 3.1, 0x120f0d, -1, 2.1, -.3);
+      for (let k=0;k<6;k++) box(B, .5, .3, .45, 0x2a2622, -1.5 + r()*3, .28, 1.4 + r()*.6, .03);
+    } else if (l.owner === 'sale'){
+      box(B, 4.3, .06, 4.3, 0x5f7a4a, 0, .15, 0, 0);
+      for (let k=0;k<4;k++) cyl(B, .35 + r()*.2, .3, 0x3f6b3a, -1.4 + r()*2.8, .3, -1.4 + r()*2.8, .03, 7);
+    } else {
+      box(B, 4.2, .06, 4.2, 0x9c978a, 0, .15, 0, 0);
+    }
+    if (l.owner === 'sale'){
+      cyl(B, .06, 1.6, 0x3a3027, -.9, .95, 1.4, .03, 5); cyl(B, .06, 1.6, 0x3a3027, .9, .95, 1.4, .03, 5);
+      const sg = new THREE.Group(); sg.position.set(0, 1.55, 1.42); sg.rotation.y = Math.PI/4; B.add(sg);
+      const m = new THREE.MeshBasicMaterial({ map:signTex('sale', false), color:0x000000 }); V.signMats.push(m);
+      const p = new THREE.Mesh(new THREE.PlaneGeometry(2.2,.5), m); sg.add(p);
+      box(sg, 2.36, .62, .06, 0x111111, 0, 0, -.05, .02);
+    }
+    if (l.owner === 'you') flagOn(V, B, 1.6, .15, -1.6);
+    V.top = 2.6; return;
+  }
+  const S0 = SHAPES[type], tier = l.biz.tier;
+  const floors = S0.f + (tier > 1 ? 1 : 0), fh = 1.35, h = floors*fh, base = .14, cz = -.25;
+  const fz = cz + S0.d/2, fx = S0.w/2;
+  box(B, S0.w, h, S0.d, V.color, 0, base + h/2, cz);
+  box(B, S0.w + .1, .45, S0.d + .1, 0x4a4540, 0, base + .22, cz, .03);
+  for (let f=1; f<floors; f++){
+    const y = base + f*fh + fh*.5;
+    for (const wx of [-S0.w*.26, S0.w*.26]) win(B, wx, y, fz + .02, 0, r() < .6);
+    for (const wz of [cz - S0.d*.24, cz + S0.d*.24]) win(B, fx + .02, y, wz, Math.PI/2, r() < .45);
+  }
+  // shopfront: lit door, awning
+  const door = new THREE.Mesh(new THREE.BoxGeometry(S0.w*.5, 1.0, .06), V.doorMat); door.position.set(0, base + .62, fz + .02); ink(door, .03); B.add(door);
+  const awn = box(B, S0.w*.82, .1, .8, S0.awn, 0, base + 1.3, fz + .38, .04); awn.rotation.x = .22;
+  // roof
+  if (S0.roof === 'pitch'){ const m = part(B, roofGeo(S0.w + .35, S0.d + .3, 1.0), toon(0xb8553a), 0, base + h + .5, cz, .06); m.rotation.y = Math.PI/2; }
+  else box(B, S0.w + .16, .24, S0.d + .16, 0x5b5650, 0, base + h + .12, cz, .04);
+  if (S0.roof === 'dome'){
+    part(B, new THREE.SphereGeometry(1.1, 16, 8, 0, Math.PI*2, 0, Math.PI/2), toon(0xd9a93a), 0, base + h + .24, cz, .05);
+    cyl(B, .05, .8, 0x16171a, 0, base + h + 1.6, cz, 0, 5);
+  }
+  // rooftop billboard, turned to face the camera
+  const sy = base + h + (S0.roof === 'pitch' ? 1.25 : S0.roof === 'dome' ? 1.4 : .85);
+  const sg = new THREE.Group(); sg.position.set(-.2, sy, cz - .4); sg.rotation.y = Math.PI/4; B.add(sg);
+  [-1.1,1.1].forEach(px => box(sg, .08, .9, .08, 0x16171a, px, -.45, -.06, 0));
+  box(sg, 2.9, .86, .08, 0x0c0c0d, 0, .2, -.08, .03);
+  const sm = new THREE.MeshBasicMaterial({ map:signTex(type, false), color:0x000000 }); V.signMats.push(sm);
+  const sp = new THREE.Mesh(new THREE.PlaneGeometry(2.7,.66), sm); sp.position.set(0, .2, -.02); sg.add(sp);
+  // vertical blade sign on the street-facing side
+  if (floors > 1){
+    const bm = new THREE.MeshBasicMaterial({ map:signTex(type, true), color:0x000000 }); V.signMats.push(bm);
+    const dark = basic(0x070707);
+    const blade = new THREE.Mesh(new THREE.BoxGeometry(.12, 1.5, .62), [bm, bm, dark, dark, dark, dark]);
+    blade.position.set(fx + .34, base + fh + .75, fz - .45); ink(blade, .03); B.add(blade);
+  }
+  flagOn(V, B, -fx + .3, base + h + (S0.roof === 'pitch' ? .1 : .24), cz - S0.d/2 + .3);
+  // props
+  if (type === 'den'){ for (const s of [-1,1]){ const lm = new THREE.MeshBasicMaterial({ color:0xff2238 }); V.lanterns.push(lm);
+      const lan = new THREE.Mesh(new THREE.SphereGeometry(.2, 10, 8), lm); lan.scale.y = 1.2; lan.position.set(s*S0.w*.36, base + 1.05, fz + .7); ink(lan, .03); B.add(lan); } }
+  if (S0.barrels) for (let k=0;k<3;k++) cyl(B, .22, .5, 0x6b4423, fx - .3 - k*.48, base + .25, fz + .85, .03);
+  if (S0.kiosk){ cyl(B, .05, 1.6, 0x16171a, fx - .2, base + .8, fz + 1.15, 0, 5);
+    part(B, new THREE.ConeGeometry(.95, .42, 8), toon(S0.awn), fx - .2, base + 1.75, fz + 1.15, .04);
+    box(B, 1.2, .55, .5, 0x6b5a46, -.5, base + .28, fz + .7, .03); }
+  if (S0.stall){ box(B, 1.6, .5, .7, 0x6b5a46, .5, base + .25, fz + .8, .03);
+    for (let k=0;k<3;k++) box(B, .4, .3, .4, [0xc9a46a,0x9b7a52,0xb08a5c][k], -1.2 + k*.45, base + .15, fz + .9, .02); }
+  if (S0.plants) for (const s of [-1,1]){ cyl(B, .18, .35, 0x7a5040, s*S0.w*.38, base + .18, fz + .5, .03);
+    part(B, new THREE.ConeGeometry(.3, .8, 7), toon(0x3f7d4a), s*S0.w*.38, base + .75, fz + .5, .03); }
+  if (S0.garage){ box(B, S0.w*.62, 1.05, .06, 0x2b2b2b, -.4, base + .55, fz + .03, .03);
+    for (let k=0;k<3;k++) cyl(B, .3, .2, 0x111111, fx - .4, base + .1 + k*.2, fz + .9, .03, 12);
+    cyl(B, .22, .55, 0x7a2a1a, fx - 1.1, base + .27, fz + .95, .03); }
+  if (S0.bulbs){ const lm = new THREE.MeshBasicMaterial({ color:0xffd36a }); V.lanterns.push(lm);
+    for (let k=0;k<9;k++){ const bl = new THREE.Mesh(new THREE.SphereGeometry(.07, 6, 5), lm); bl.position.set(-S0.w*.42 + k*S0.w*.105, base + 1.5, fz + .78); B.add(bl); } }
+  if (S0.tables) for (const s of [-1,1]){ cyl(B, .35, .06, 0xd8d2c4, s*1.05, base + .55, fz + 1.05, .03); cyl(B, .04, .55, 0x16171a, s*1.05, base + .28, fz + 1.05, 0, 5);
+    part(B, new THREE.ConeGeometry(.7, .3, 8), toon(s > 0 ? 0xc8322f : 0x2f6fb5), s*1.05, base + 1.45, fz + 1.05, .03); cyl(B, .03, .9, 0x16171a, s*1.05, base + 1.05, fz + 1.05, 0, 4); }
+  if (S0.portholes) for (const s of [-1,0,1]){ const p = cyl(B, .26, .08, basic(0xbfe9ff), s*.8, base + .55, fz + .05, .03, 14); p.rotation.x = Math.PI/2; }
+  V.top = sy + .9;
+}
+
+function makeBackdrop(rand){
+  const hut = (parent, x, z, w, d, h, roof) => {
+    const c = PASTEL[Math.floor(rand()*PASTEL.length)];
+    box(parent, w, h, d, c, x, h/2 + .2, z, .06);
+    if (roof){ const m = part(parent, roofGeo(w + .3, d + .3, .9), toon(0x8f4a35), x, h + .2 + .45, z, .05); m.rotation.y = Math.PI/2; }
+    else box(parent, w + .14, .2, d + .14, 0x4f4b46, x, h + .3, z, .03);
+    for (let y = 1.4; y < h - .3; y += 1.3){
+      for (let wx = -w/2 + .6; wx < w/2 - .3; wx += 1.1) G.winPositions.push({ x:x+wx, y:y+.2, z:z+d/2+.03, ry:0, p:.35 });
+      for (let wz = -d/2 + .6; wz < d/2 - .3; wz += 1.2) G.winPositions.push({ x:x+w/2+.03, y:y+.2, z:z+wz, ry:Math.PI/2, p:.25 });
+    }
+  };
+  for (const cx of [-21,-7,7,21]) for (const cz of [-21,-7,7,21]){
+    if (Math.abs(cx) === 7 && Math.abs(cz) === 7) continue;
+    box(G.scene, 10.2, .2, 10.2, 0x5f5c56, cx, .1, cz, .03);
+  }
+  // far towers fade into the rain
+  // kept apart from the baked backdrop: a fogged tower must stop drawing, or it blocks the map in front of it
+  G.towers = [];
+  for (let k=0;k<12;k++){
+    const a = rand()*Math.PI*2, r = 40 + rand()*14, x = Math.cos(a)*r - 8, z = Math.sin(a)*r - 8, g = new THREE.Group(), n = G.winPositions.length;
+    hut(g, x, z, 5, 5, 8 + rand()*16, false); bake(g);
+    for (let j=n;j<G.winPositions.length;j++) G.winPositions[j].t = k;
+    G.towers.push({ g, cell: Math.min(7, Math.max(0, Math.floor((z+56)/14)))*8 + Math.min(7, Math.max(0, Math.floor((x+56)/14))), open:null });
+  }
+  // Sultan Abdul Samad clock tower, down the road
+  const tx = -36, tz = -34;
+  box(G.scene, 12, 3.2, 4, 0xb4573a, tx, 1.8, tz, .08);
+  for (let y = .6; y < 3; y += .7) box(G.scene, 12.04, .12, 4.04, 0xe9e2cf, tx, y, tz, 0);
+  box(G.scene, 2.2, 9, 2.2, 0xb4573a, tx, 4.7, tz, .08);
+  for (let y = 1; y < 9; y += 1.2) box(G.scene, 2.24, .14, 2.24, 0xe9e2cf, tx, y, tz, 0);
+  const dome = part(G.scene, new THREE.SphereGeometry(1.3, 16, 12), toon(0x8c7a3a), tx, 9.9, tz, .06); dome.scale.y = 1.25;
+  cyl(G.scene, .06, 1.4, 0x16171a, tx, 11.8, tz, 0, 5);
+  for (const [dx,dz,ry] of [[0,1.12,0],[1.12,0,Math.PI/2]]){ const c = cyl(G.scene, .55, .08, basic(0xf1ebdd), tx + dx, 7.6, tz + dz, .04, 18); c.rotation.x = Math.PI/2; if (ry) c.rotation.z = Math.PI/2, c.rotation.x = 0, c.rotation.y = 0; }
+  for (const s of [-1,1]){ const sd = part(G.scene, new THREE.SphereGeometry(.7, 12, 8), toon(0x8c7a3a), tx + s*5, 3.9, tz, .05); sd.scale.y = 1.2; }
+}
+
+function resetDrop(k, init){
+  const R = G.rain, p = R.pos, t = G.pov ? G.pov.w.g.position : (G.target || { x:0, z:0 });
+  const rad = G.pov ? 13 : 44, top = G.pov ? 9 : 34;
+  const x = t.x + rnd(-rad,rad), z = t.z + rnd(-rad,rad), y = init ? rnd(0,top) : rnd(top*.8,top), len = G.pov ? rnd(.25,.45) : rnd(.6,1.1);
+  p[k*6] = x; p[k*6+1] = y; p[k*6+2] = z; p[k*6+3] = x + .12; p[k*6+4] = y + len; p[k*6+5] = z;
+  R.v[k] = rnd(28,36);
+}
+
+function buildCar(color, top){
+  const c = new THREE.Group();
+  box(c, 1.9, .5, .95, color, 0, .5, 0, .05);
+  box(c, 1.05, .42, .85, top, -.1, .96, 0, .05);
+  for (const sx of [-.6,.6]) for (const sz of [-.48,.48]){ const w = cyl(c, .2, .12, 0x0b0b0b, sx, .22, sz, 0, 10); w.rotation.x = Math.PI/2; }
+  for (const dz of [-.3,.3]){ const h = new THREE.Mesh(new THREE.BoxGeometry(.06,.12,.18), basic(0xfff4dc)); h.position.set(.96,.55,dz); c.add(h);
+                               const t = new THREE.Mesh(new THREE.BoxGeometry(.06,.1,.2), basic(0xff1a10)); t.position.set(-.96,.55,dz); c.add(t); }
+  const beam = new THREE.Mesh(new THREE.PlaneGeometry(4.5,2), new THREE.MeshBasicMaterial({ map:G.streakTex, color:0x9a9480, transparent:true, opacity:.5, blending:THREE.AdditiveBlending, depthWrite:false }));
+  beam.rotation.x = -Math.PI/2; beam.rotation.z = -Math.PI/2; beam.position.set(3.2,.06,0); c.add(beam);
+  return c;
+}
+function makeCars(){
+  G.cars = [];
+  const lanes = [['x',-1,-1],['x',1,1],['z',1,-1],['z',-1,1],['x',13,1],['x',-15,-1],['z',15,1],['z',-13,-1]];
+  const paints = [[0xc8322f,0xf1ebdd],[0x2f6fb5,0xd8e2ee],[0xe9e2cf,0x2b2d33],[0x3f7d4a,0xe9e2cf],[0x1b1c1f,0x30333a],[0xd9a93a,0xf1ebdd]];
+  lanes.forEach(([axis, c, dir], k) => {
+    const [a,b] = paints[k % paints.length]; const g = buildCar(a, b);
+    g.rotation.y = axis === 'x' ? (dir > 0 ? 0 : Math.PI) : (dir > 0 ? -Math.PI/2 : Math.PI/2);
+    const p = rnd(-40,40); if (axis === 'x') g.position.set(p, 0, c); else g.position.set(c, 0, p);
+    G.scene.add(g); G.cars.push({ g, axis, dir, v:rnd(5,8) });
+  });
+}
+/* =========================================================================
+   NPC FACTORY — distinct bystanders: a profile, a jointed body, an inner voice
+   createNPC(seed, overrides) → { profile, rig }
+   ========================================================================= */
+const COMMUNITIES = {
+  malay:    { w:4, m:['Ahmad','Zainal','Kassim','Rosli','Hafiz','Azman','Bakar','Jamal','Faizal','Hassan','Ismail','Razak','Khalid','Osman'],
+                   f:['Rosnah','Siti','Salmah','Nora','Aminah','Zaleha','Yati','Fatimah','Rohani','Nadia','Habibah','Ramlah'],
+                   elder:{ m:'Pak ', f:'Mak Cik ' }, name:(g,given) => given },
+  chinese:  { w:4, m:['Ah Seng','Kok Wah','Ah Huat','Ah Fook','Kee','Beng','Chong','Ah Boy','Kevin','Danny','Jimmy','Ah Pang','Swee Leong'],
+                   f:['Mei Ling','Ah Mui','Lily','Siew Lan','Pauline','Moon','Jenny','Ah Lian','Swee Kim','Ah Ngoh'],
+                   sur:['Tan','Lim','Wong','Lee','Chan','Ng','Ong','Chua','Loh','Yap','Teoh'],
+                   elder:{ m:'Uncle ', f:'Auntie ' }, name:(g,given,sur) => /^Ah /.test(given) ? given : /^(Kevin|Danny|Jimmy|Lily|Pauline|Moon|Jenny)$/.test(given) ? `${given} ${sur}` : `${sur} ${given}` },
+  indian:   { w:3, m:['Ravi','Kumar','Selvam','Murugan','Raju','Ganesh','Arumugam','Suresh','Bala','Krishnan'],
+                   f:['Meena','Devi','Kavitha','Priya','Rani','Lakshmi','Shanti','Vasanthi'],
+                   elder:{ m:'Uncle ', f:'Aunty ' }, name:(g,given) => given },
+  eurasian: { w:1, m:['Victor','Joseph','Anthony','Gerald'], f:['Agnes','Rosalind','Maria','Theresa'], sur:['de Souza','Pereira',"D'Cruz",'Rodrigues'],
+                   elder:{ m:'Mr ', f:'Mrs ' }, name:(g,given,sur) => `${given} ${sur}` },
+};
+const SKIN = [0xf1d0b0, 0xe6bf98, 0xd4a57c, 0xb98560, 0x9a6844, 0x7a4f32];
+const SKIN_BY = { malay:[2,3,4], chinese:[0,1,2], indian:[3,4,5], eurasian:[1,2,3] };
+const CLOTH = [0x2b2d33,0x6a3a3a,0x3a4a6a,0x7a6a4a,0x2f5a4a,0x5a3a6a,0xb8b2a4,0x8a2f2f,0x2f4f7a,0x6b5a2f,0xd9cdb0,0x45464c];
+const BRIGHT = [0xc8322f,0x2f6fb5,0xd9a93a,0x3f7d4a,0xc94a8c,0x7a52c9,0xe07b39,0x2aa59a];
+
+const JOBS = [
+  { job:'kuih seller', outfit:['kurung','sarong','apron'], acc:['basket'], age:[30,70],
+    lines:['Kuih lapis, twenty sen. The boys from the den buy the whole tray at dawn.','My kuih is sold out by ten. The gamblers eat like they\'ll never eat again.'] },
+  { job:'trishaw rider', g:'m', outfit:['singlet','shirt'], hat:'cap', age:[35,75],
+    lines:['Fares are thin when it rains. Gamblers tip, though, when they\'ve won.','Thirty years pedalling this street. My knees know every pothole.'] },
+  { job:'off-duty policeman', g:'m', outfit:['shirt','jacket'], acc:['newspaper'], age:[28,50], tie:'police',
+    lines:['My sergeant drives a new Volvo. On a sergeant\'s pay.','Everyone on this street knows my face. Nobody says good evening.'] },
+  { job:'beat constable', g:'m', outfit:['police'], hat:'police', age:[22,40], tie:'police',
+    lines:['Walk the beat, write nothing down, go home. That\'s the job here.','The inspector says Chow Kit is under control. The inspector has never walked it at night.'] },
+  { job:'night-shift nurse', g:'f', outfit:['nurse'], hat:'nurse', age:[22,45],
+    lines:['Third stab wound this month at the General. Nobody ever saw anything.','I stitch up Geng Lorong boys on Monday and the red outfit\'s boys on Tuesday.'] },
+  { job:'retired goldsmith', outfit:['shirt'], age:[62,82],
+    lines:['Forty years on this street. The neon gets brighter and the people get poorer.','Gold doesn\'t lie. Everything else on this street does.'] },
+  { job:'bus conductor', outfit:['shirt'], acc:['bag'], age:[22,55],
+    lines:['Last bus to Sentul at eleven. Half the passengers smell of arak.','Ticket, ticket. Nobody on the night bus ever has the right change.'] },
+  { job:'factory worker', outfit:['kurung','shirt','dress'], age:[18,30],
+    lines:['Ten hours soldering radios in Shah Alam, then the bus home.','The supervisor says the factory might move to Penang. Then what?'] },
+  { job:'reporter at Warta Malam', outfit:['jacket','office'], acc:['newspaper'], hat:'fedora', age:[25,55],
+    lines:['There\'s a story on this street. My editor says it isn\'t worth a funeral.','Two gangs, one street. Somebody always talks eventually.'] },
+  { job:'newspaper vendor', outfit:['singlet','shirt'], acc:['newspaper'], age:[40,75],
+    lines:['Warta Malam sells out whenever there\'s a fire.','Bad news sells. Good news, I use to wrap fish.'] },
+  { job:'insurance salesman', outfit:['office'], acc:['briefcase'], age:[25,55],
+    lines:['Fire insurance is a hard sell here. Everyone knows how the fires start.','Life insurance? On this street? I should sell umbrellas instead.'] },
+  { job:'night watchman', g:'m', outfit:['shirt'], age:[45,72],
+    lines:['I guard a warehouse full of nothing. They pay me not to see the lorries.','Night watchman. The night never asks me to watch anything good.'] },
+  { job:'flower seller', outfit:['kurung','saree','shirt'], acc:['basket'], age:[30,70],
+    lines:['Jasmine for the temple, roses for the hostesses. Same price.','Men buy flowers when they\'ve lost at mahjong. Guilt is good business.'] },
+  { job:'char kway teow hawker', outfit:['singlet','apron'], age:[35,70],
+    lines:['Wok hei and rain. My stall has stood here longer than any gang.','Geng Lorong eats free. The new outfit pays. I notice these things.'] },
+  { job:'bar singer', g:'f', outfit:['cheongsam','saree','dress'], age:[22,45],
+    lines:['They always ask for "Bengawan Solo" when it rains.','I sing for drunks who think they\'re in love. Some nights I believe them.'] },
+  { job:'lorry driver', g:'m', outfit:['singlet','shirt'], hat:'cap', age:[25,60],
+    lines:['Port Klang at four, Chow Kit by six. I don\'t open the back. I don\'t want to know.','Every load has two prices: what\'s on the paper and what\'s in the crate.'] },
+  { job:'dance-hall hostess', g:'f', outfit:['cheongsam','dress'], age:[20,35],
+    lines:['Ten cents a dance, and the men still count the change.','The madam says smile. I smile. The rent gets paid.'] },
+  { job:'municipal inspector', outfit:['office'], acc:['briefcase'], age:[30,58],
+    lines:['Licence or no licence, an envelope settles both.','I inspect what I\'m paid to inspect. Nothing else.'] },
+  { job:'temple caretaker', age:[55,82], outfit:['shirt','kurung','saree'],
+    lines:['More joss sticks lit this month than last. People are praying for luck.','The gods hear everything on this street. They keep it to themselves.'] },
+  { job:'college student', outfit:['shirt','dress'], acc:['books'], age:[18,24],
+    lines:['Exams in two weeks and I\'m walking past a gambling den at midnight.','My lecturer says Malaysia will be an industrial nation. Chow Kit hasn\'t heard.'] },
+  { job:'seamstress', g:'f', outfit:['kurung','saree','cheongsam'], age:[25,65],
+    lines:['I hem trousers for gangsters. They tip well and never say thank you.','Every hostess on this street wears my dresses. I know all their sizes, and their secrets.'] },
+  { job:'fortune teller', outfit:['shirt','kurung'], age:[50,82],
+    lines:['I tell them the cards say luck is coming. The cards never say from where.','Everyone wants to know their future. Nobody on this street wants to hear it.'] },
+  { job:'ex-boxer', g:'m', outfit:['singlet'], age:[30,55], build:1.25,
+    lines:['Mat Botak offered me work. I said I had bad knees. I don\'t.','I can still take a punch. It\'s the rent I can\'t take.'] },
+  { job:'telephone operator', g:'f', outfit:['dress','kurung'], age:[20,40],
+    lines:['I connect the calls and forget the voices. That\'s the rule.','A man called the station from a kopitiam last week and hung up before giving his name.'] },
+  { job:'bicycle repairman', g:'m', outfit:['singlet'], age:[30,70],
+    lines:['Kids from Geng Lorong bring stolen bicycles. I don\'t ask.','Spokes and chains. Simple things that do what they\'re meant to.'] },
+  { job:'taxi driver', g:'m', outfit:['shirt'], hat:'cap', age:[28,65],
+    lines:['A Datuk paid me fifty to wait outside the gambling hall. I waited.','Fares from Chow Kit to Bukit Bintang. Same men, different shirts.'] },
+  { job:'schoolteacher', outfit:['office','kurung','saree'], acc:['books'], age:[25,60],
+    lines:['Half my class wants to be bola runners. The other half already are.','I teach them arithmetic. The Ah Long teaches them interest.'] },
+  { job:'cinema projectionist', g:'m', outfit:['shirt'], age:[25,60],
+    lines:['P. Ramlee at seven, kung fu at nine. The rats prefer kung fu.','I watch the films backwards through a little window. Life looks better that way.'] },
+  { job:'barber', g:'m', outfit:['shirt','apron'], age:[30,70],
+    lines:['Everyone talks in the barber\'s chair. Even Mat Botak.','A shave and a rumour, two ringgit.'] },
+  { job:'office clerk', outfit:['office'], acc:['briefcase'], age:[22,50],
+    lines:['Eight to five in a government office, then the dance hall till midnight.','I file papers about land in Kampung Baru. Somebody keeps buying it.'] },
+  { job:'collector for an Ah Long', g:'m', outfit:['jacket','shirt'], age:[22,45], tie:'ahlong',
+    lines:['I knock, they pay. If they don\'t, I knock harder. It\'s just a job.','My mother thinks I work in insurance. In a way, I do.'] },
+  { job:'mahjong dealer', outfit:['shirt','cheongsam'], age:[25,60], tie:'den',
+    lines:['I shuffle tiles till my wrists ache. The house always wins; I just work for the house.','Good players never smile. Bad players never stop.'] },
+  { job:'bola runner', g:'m', outfit:['shirt','singlet'], age:[18,35], tie:'bola',
+    lines:['Slips in my left pocket, cash in my right. Never mix them up.','Selangor lost again. Half the street owes the book now.'] },
+];
+
+const TEMPERS = {
+  weary:   { label:'Weary',   lines:['Another night, another wet pair of shoes.','I\'m too tired to be afraid of anything anymore.','The rain sounds like applause for nobody.'],
+             you:'Another boss, another set of rules. They all end the same.', rival:'Geng Lorong again. I don\'t even look up anymore.' },
+  cynical: { label:'Cynical', lines:['Everybody on this street is selling something. Mostly themselves.','The police, the gangs, the council. Same envelope, different hands.','Hope is a ringgit you never get back.'],
+             you:'The new boss pays the old men\'s coffee tabs. Buying a street one kopi at a time.', rival:'Mat Botak calls it protection. Protection from Mat Botak.' },
+  hopeful: { label:'Hopeful', lines:['One good month and I\'m out of here.','The rain stops eventually. It has to.','Somebody told me the government is building towers by the racecourse. Jobs, maybe.'],
+             you:'They say the red outfit pays fair. Maybe things are changing.', rival:'Geng Lorong can\'t last forever. Nobody does.' },
+  nervous: { label:'Nervous', lines:['Is that man following me? He\'s been behind me since the market.','Walk faster. Don\'t look at the doorways.','I should have taken the bus.'],
+             you:'Red signs mean the new outfit. Keep your head down, they\'re friendly until they\'re not.', rival:'Teal light. Geng Lorong. Don\'t look, don\'t look, don\'t look.' },
+  bitter:  { label:'Bitter',  lines:['This street took my father\'s shop and gave it to a gangster.','Everyone got rich in the seventies except me.','My brother left for Singapore. Smart man. Cruel man.'],
+             you:'The boss from Ipoh. Another outsider buying what we built.', rival:'Mat Botak was a nobody in my school. Now he owns my old street.' },
+  romantic:{ label:'Romantic',lines:['Neon in the puddles. You could almost call it pretty.','Somebody\'s radio is playing Sudirman through an open window.','I met her on this corner, under that awning. She married a dentist.'],
+             you:'There\'s something about the red neon. Like a film.', rival:'Even Geng Lorong\'s doors look beautiful in the rain. Dangerous things usually do.' },
+  nosy:    { label:'Nosy',    lines:['Mrs Chan\'s husband came home at four again. Dance hall, definitely.','Two cars outside the gambling hall I\'ve never seen before. Who are they?','I know who owes who on this street. Better than any ledger.'],
+             you:'I saw the boss from Ipoh himself last week. Smaller than I thought.', rival:'Mat Botak bought a new Mercedes. Paid cash, they say.' },
+  proud:   { label:'Proud',   lines:['My family has lived on this street since before Merdeka.','I don\'t bow to gangsters. I just don\'t make eye contact.','Clean shoes, clean shirt, clean conscience. Two out of three.'],
+             you:'The new boss keeps the drunks off my doorstep. I\'ll give him that much.', rival:'Geng Lorong spits on the five-foot way. No respect.' },
+};
+const HOPES = ['to save enough for a shophouse of my own','to send my son to university in England','to go back to my village with money in my pocket','to see the sea at Port Dickson again','to buy a Honda Cub before the year ends','to get out of Chow Kit before it gets me','to sing at the Merlin Hotel one day','to pay off my father\'s debts','to have a kitchen with a refrigerator','to marry before my mother gives up asking','to open a stall at the new Central Market'];
+const FEARS = ['the Ah Long knocking on my door','losing my job when the factory moves','my son running with Geng Lorong','the police finding out about my cousin','getting old alone in a rented room','fire, ever since the shophouse on Lorong Haji Taib burned','that my wife already knows','the landlord selling to a gangster','another raid on the street, with me caught in it'];
+const KIN = ['My wife','My mother','My daughter','My brother','My husband','My son','My landlady','My father'];
+const KIN_LINES = ['{kin} thinks I\'m working late.','{kin} wants me to leave Chow Kit. {kin} is probably right.','{kin} hasn\'t spoken to me since Raya.','{kin} keeps our savings in a Milo tin under the bed.','{kin} says the rain is a sign. Of what, nobody knows.'];
+
+const SECRETS = [
+  { text:'I saw Mat Botak\'s runners loading petrol cans into a van behind the bola shop. They\'re planning something for the end of the week.', fx:'delay', note:'Forewarned: Geng Lorong\'s next move is delayed by a day.' },
+  { text:'The station chief\'s driver drinks at the back-room bar on Thursdays. He talks when he drinks, and he\'ll stop talking if somebody buys his rounds.', fx:'heat', note:'Heat −6: a friendly ear at the station.' },
+  { text:'There\'s a tin of ringgit under the floor of the old goldsmith shop. My uncle never trusted banks, and my uncle is dead.', fx:'cash', note:'Dirty cash +RM 400.' },
+  { text:'Two of Mat Botak\'s enforcers are sick of him. They\'d work for anyone who pays on Fridays.', fx:'muscle', note:'One of Mat Botak\'s enforcers changes sides: muscle +1.' },
+  { text:'My cousin works the customs desk at Port Klang. A carton here, a carton there, and nobody counts.', fx:'cash2', note:'Dirty cash +RM 250.' },
+  { text:'Geng Lorong keeps their takings in a biscuit tin under the counter. Everybody on the street knows except the police.', fx:'respect', note:'Respect +3: you know more than Mat Botak thinks.' },
+  { text:'The headman in the next block owes my brother a favour. Mention my name.', fx:'discount', note:'Your next expansion costs 20% less.' },
+  { text:'I tell my family I work overtime. I\'m at the dance hall every night, and I\'ve never once danced.', fx:null },
+  { text:'I still write letters to a girl in Ipoh. I never post them.', fx:null },
+  { text:'I took twenty ringgit from the temple box when I was nineteen. I\'ve put back two hundred since. It doesn\'t help.', fx:null },
+  { text:'I\'m the one who told the newspaper about the fire. Nobody suspects the quiet ones.', fx:null },
+  { text:'I bet my bonus on Selangor. Selangor lost. My wife thinks the bonus was cancelled.', fx:null },
+];
+
+function seededPick(rng, a){ return a[Math.floor(rng()*a.length)]; }
+function weightedPick(rng, obj){ const ks = Object.keys(obj); let t = ks.reduce((s,k)=>s+obj[k].w,0)*rng(); for (const k of ks){ if ((t -= obj[k].w) <= 0) return k; } return ks[0]; }
+
+function generateProfile(rng, o={}){
+  const jobDef = o.job ? JOBS.find(j => j.job === o.job) : seededPick(rng, JOBS);
+  const g = o.gender || jobDef.g || (rng() < .5 ? 'm' : 'f');
+  const community = o.community || weightedPick(rng, COMMUNITIES), C = COMMUNITIES[community];
+  const age = o.age || Math.round(jobDef.age[0] + rng()*(jobDef.age[1]-jobDef.age[0]));
+  const given = seededPick(rng, C[g]), sur = C.sur ? seededPick(rng, C.sur) : '';
+  let name = C.name(g, given, sur);
+  if (age >= 52 && rng() < .8) name = C.elder[g] + (community === 'eurasian' ? sur : given);
+  // clothing: job first, then community and gender shape the options
+  let outfits = jobDef.outfit || ['shirt'];
+  outfits = outfits.filter(x => !(g === 'm' && ['kurung','saree','cheongsam','dress','nurse'].includes(x)));
+  if (!outfits.length) outfits = ['shirt'];
+  if (g === 'f' && community === 'malay' && outfits.includes('dress') && rng() < .6) outfits = ['kurung'];
+  if (g === 'f' && community === 'indian' && rng() < .45 && !['nurse','police'].includes(outfits[0])) outfits = outfits.concat(['saree']);
+  const outfit = o.outfit || seededPick(rng, outfits);
+  let hat = o.hat || jobDef.hat || null;
+  let hair = age > 60 ? (rng() < .3 && g === 'm' ? 'bald' : 'grey') : 'dark';
+  if (!hat){
+    if (community === 'malay' && g === 'f' && rng() < .7) hat = 'tudung';
+    else if (community === 'malay' && g === 'm' && rng() < .25) hat = 'songkok';
+    else if (g === 'm' && rng() < .12) hat = 'fedora';
+  }
+  const style = g === 'f' ? (hat === 'tudung' ? 'none' : seededPick(rng, ['long','bun','bob','perm'])) : (hair === 'bald' ? 'none' : seededPick(rng, ['short','short','slick','crop']));
+  const temperKey = o.temper || seededPick(rng, Object.keys(TEMPERS));
+  const acc = o.acc !== undefined ? o.acc : (jobDef.acc && rng() < .8 ? seededPick(rng, jobDef.acc) : null);
+  const umbrella = o.umbrella !== undefined ? o.umbrella : (acc === null || acc === 'newspaper' || acc === 'books') && rng() < .65 && outfit !== 'police';
+  const ties = { debt: 0, side: null, informant: null };
+  if (jobDef.tie === 'ahlong' || jobDef.tie === 'den' || jobDef.tie === 'bola') ties.side = rng() < .5 ? 'you' : 'rival';
+  if (jobDef.tie === 'police' && rng() < .4) ties.informant = rng() < .5 ? 'you' : 'rival';
+  if (!jobDef.tie && rng() < .2) ties.debt = 300 + Math.round(rng()*27)*100;
+  if (!ties.side && rng() < .08) ties.side = rng() < .5 ? 'you' : 'rival';
+  const elderly = age >= 65;
+  return {
+    name, given, community, gender:g, age, job:jobDef.job, jobLines:jobDef.lines, tie:jobDef.tie || null, temper:temperKey,
+    outfit, hat, hair, style, acc, umbrella, smoker: rng() < .3,
+    height: (g === 'm' ? 1.17 : 1.09) * (.94 + rng()*.12) * (elderly ? .96 : 1),
+    build: (jobDef.build || 1) * (.86 + rng()*.3),
+    skin: SKIN[seededPick(rng, SKIN_BY[community])],
+    top: outfit === 'police' ? 0x1d2a4d : outfit === 'nurse' ? 0xeeeae2 : outfit === 'office' ? 0xe6e3dc : outfit === 'singlet' ? 0xe9e5dc :
+         ['kurung','saree','cheongsam','dress'].includes(outfit) ? seededPick(rng, BRIGHT.concat(CLOTH)) : seededPick(rng, CLOTH),
+    bottom: outfit === 'police' ? 0x1d2a4d : outfit === 'nurse' ? 0xeeeae2 : seededPick(rng, [0x1f2024,0x2b2d33,0x3a3530,0x4a4540,0x2f3a4a,0x5a5248]),
+    accent: seededPick(rng, BRIGHT),
+    hatColor: hat === 'tudung' ? seededPick(rng, BRIGHT.concat([0xeeeae2,0x2b2d33])) : hat === 'songkok' ? 0x111111 : hat === 'fedora' ? seededPick(rng,[0x2b2d33,0x4a4540,0x6b5a46]) : 0x1d2a4d,
+    hairColor: hair === 'grey' ? seededPick(rng,[0x8a8780,0xb8b4ac,0xd8d4cc]) : 0x15120f,
+    stride: elderly ? .32 : .48 + rng()*.12, pace: elderly ? .45 + rng()*.2 : .65 + rng()*.45, hunch: elderly ? .16 : rng()*.05,
+    hope: seededPick(rng, HOPES), fear: ties.debt ? FEARS[0] : seededPick(rng, FEARS),
+    kin: seededPick(rng, KIN), kinLine: seededPick(rng, KIN_LINES),
+    secret: o.secret || seededPick(rng, SECRETS), secretKnown:false, ties,
+  };
+}
+
+function buildRig(p){
+  const H = p.height, b = p.build;
+  const root = new THREE.Group(), body = new THREE.Group(); root.add(body);
+  const leg = .47*H, thigh = leg*.52, shin = leg*.48, torsoL = .3*H, shY = leg + torsoL;
+  const headR = .085*H, neck = .035*H, upper = .19*H, fore = .17*H;
+  const skin = toon(p.skin), top = toon(p.top), bot = toon(p.bottom), shoe = toon(0x141416);
+  const robe = ['kurung','saree','cheongsam','dress','nurse'].includes(p.outfit) || (p.outfit === 'sarong');
+  const legMat = p.outfit === 'singlet' && p.gender === 'm' ? bot : robe ? skin : bot;
+  const mkLeg = sx => {
+    const hip = new THREE.Group(); hip.position.set(sx*.055*b, leg, 0); body.add(hip);
+    const th = new THREE.Mesh(new THREE.CylinderGeometry(.045*b, .04*b, thigh, 7), legMat); th.position.y = -thigh/2; hip.add(th);
+    const knee = new THREE.Group(); knee.position.y = -thigh; hip.add(knee);
+    const sh = new THREE.Mesh(new THREE.CylinderGeometry(.038*b, .032*b, shin, 7), robe ? skin : bot); sh.position.y = -shin/2; knee.add(sh);
+    const ft = new THREE.Mesh(new THREE.BoxGeometry(.07*b, .04, .14), shoe); ft.position.set(0, -shin + .02, .035); knee.add(ft);
+    return [hip, knee];
+  };
+  const [hipL, kneeL] = mkLeg(-1), [hipR, kneeR] = mkLeg(1);
+  // pelvis + torso
+  const pel = new THREE.Mesh(new THREE.BoxGeometry(.2*b, .09*H, .13*b), bot); pel.position.y = leg + .02; body.add(pel);
+  const torso = new THREE.Group(); torso.position.y = leg; body.add(torso);
+  const chest = new THREE.Mesh(new THREE.CylinderGeometry(.125*b, .1*b, torsoL, 9), p.outfit === 'singlet' ? toon(0xe9e5dc) : top);
+  chest.scale.z = .68; chest.position.y = torsoL/2 + .02; ink(chest, .025); torso.add(chest);
+  if (robe){
+    const len = leg - .06, flare = p.outfit === 'cheongsam' ? .11 : p.outfit === 'nurse' || p.outfit === 'dress' ? .17 : .15;
+    const skirtMat = p.outfit === 'sarong' ? toon(p.accent) : top;
+    const sk = new THREE.Mesh(new THREE.CylinderGeometry(.1*b, flare*b, p.outfit === 'dress' || p.outfit === 'nurse' ? len*.6 : len, 10), skirtMat);
+    sk.scale.z = .8; sk.position.y = leg + .04 - (p.outfit === 'dress' || p.outfit === 'nurse' ? len*.3 : len/2); ink(sk, .025); body.add(sk);
+  }
+  if (p.outfit === 'saree'){ const d = new THREE.Mesh(new THREE.BoxGeometry(.06, torsoL*1.1, .2*b), toon(p.accent)); d.position.set(.05, torsoL*.55, .02); d.rotation.z = -.5; torso.add(d); }
+  if (p.outfit === 'office'){ const t = new THREE.Mesh(new THREE.BoxGeometry(.03, torsoL*.7, .01), toon(p.accent)); t.position.set(0, torsoL*.58, .075*b); torso.add(t); }
+  if (p.outfit === 'apron'){ const a = new THREE.Mesh(new THREE.BoxGeometry(.17*b, torsoL*.9, .01), toon(0xd8d2c4)); a.position.set(0, torsoL*.2, .08*b); torso.add(a); }
+  if (p.outfit === 'jacket'){ const l = new THREE.Mesh(new THREE.BoxGeometry(.05, torsoL*.8, .02), toon(0xe6e3dc)); l.position.set(0, torsoL*.55, .078*b); torso.add(l); }
+  if (p.outfit === 'police'){ const belt = new THREE.Mesh(new THREE.BoxGeometry(.21*b, .03, .15*b), toon(0x3a2a1a)); belt.position.y = .04; torso.add(belt); }
+  // neck & head
+  const nk = new THREE.Mesh(new THREE.CylinderGeometry(.03, .035, neck, 6), skin); nk.position.y = torsoL + neck/2; torso.add(nk);
+  const head = new THREE.Group(); head.position.y = torsoL + neck + headR*.9; torso.add(head);
+  const hd = new THREE.Mesh(new THREE.SphereGeometry(headR, 12, 10), skin); hd.scale.set(.92, 1.08, 1); ink(hd, .015); head.add(hd);
+  const nose = new THREE.Mesh(new THREE.BoxGeometry(.018, .03, .02), skin); nose.position.set(0, -.005, headR*.98); head.add(nose);
+  for (const sx of [-1,1]){ const e = new THREE.Mesh(new THREE.BoxGeometry(.016, .01, .006), basic(0x111111)); e.position.set(sx*headR*.36, headR*.18, headR*.92); head.add(e); }
+  const hairMat = toon(p.hairColor);
+  if (p.hat === 'tudung'){
+    const t = new THREE.Mesh(new THREE.SphereGeometry(headR*1.12, 12, 10), toon(p.hatColor)); t.scale.set(.95, 1.1, 1.02); t.position.z = -.008; head.add(t);
+    const dr = new THREE.Mesh(new THREE.ConeGeometry(.16*b, .2*H, 10, 1, true), toon(p.hatColor)); dr.position.y = -headR*1.1; head.add(dr);
+    const face = new THREE.Mesh(new THREE.CircleGeometry(headR*.62, 12), skin); face.position.set(0, -.004, headR*1.1); head.add(face);
+    for (const sx of [-1,1]){ const e = new THREE.Mesh(new THREE.BoxGeometry(.016, .01, .006), basic(0x111111)); e.position.set(sx*headR*.3, headR*.12, headR*1.12); head.add(e); }
+  } else {
+    if (p.style !== 'none'){
+      const cap0 = new THREE.Mesh(new THREE.SphereGeometry(headR*1.06, 12, 8, 0, Math.PI*2, 0, Math.PI*.55), hairMat); cap0.position.y = .006; cap0.rotation.x = -.25; head.add(cap0);
+      if (p.style === 'long'){ const bk = new THREE.Mesh(new THREE.BoxGeometry(headR*1.7, headR*2.2, headR*.5), hairMat); bk.position.set(0, -headR*.7, -headR*.75); head.add(bk); }
+      if (p.style === 'bun'){ const bn = new THREE.Mesh(new THREE.SphereGeometry(headR*.45, 8, 6), hairMat); bn.position.set(0, headR*.5, -headR*.95); head.add(bn); }
+      if (p.style === 'bob'){ const bk = new THREE.Mesh(new THREE.CylinderGeometry(headR*1.08, headR*1.12, headR*1.1, 12, 1, true), hairMat); bk.position.y = -headR*.15; head.add(bk); }
+      if (p.style === 'perm'){ const pm = new THREE.Mesh(new THREE.SphereGeometry(headR*1.22, 9, 7), hairMat); pm.position.set(0, headR*.25, -headR*.15); pm.scale.set(1,.8,1); head.add(pm); }
+      if (p.style === 'slick'){ cap0.scale.set(1, .85, 1.1); }
+    }
+    if (p.hat === 'songkok'){ const s = new THREE.Mesh(new THREE.CylinderGeometry(headR*.95, headR*1.0, headR*.85, 14), toon(0x111111)); s.position.y = headR*.75; head.add(s); }
+    if (p.hat === 'fedora'){ const br = new THREE.Mesh(new THREE.CylinderGeometry(headR*1.75, headR*1.75, .012, 16), toon(p.hatColor)); br.position.y = headR*.62; head.add(br);
+      const cr = new THREE.Mesh(new THREE.CylinderGeometry(headR*.95, headR*1.05, headR*.8, 14), toon(p.hatColor)); cr.position.y = headR*1.0; head.add(cr);
+      const bd = new THREE.Mesh(new THREE.CylinderGeometry(headR*1.06, headR*1.06, headR*.18, 14), toon(0x111111)); bd.position.y = headR*.75; head.add(bd); }
+    if (p.hat === 'cap'){ const c = new THREE.Mesh(new THREE.SphereGeometry(headR*1.08, 12, 6, 0, Math.PI*2, 0, Math.PI*.5), toon(p.accent)); c.position.y = .01; head.add(c);
+      const v = new THREE.Mesh(new THREE.BoxGeometry(headR*1.3, .01, headR*.8), toon(p.accent)); v.position.set(0, headR*.25, headR*1.05); head.add(v); }
+    if (p.hat === 'police'){ const c = new THREE.Mesh(new THREE.CylinderGeometry(headR*1.25, headR*1.0, headR*.6, 14), toon(0x1d2a4d)); c.position.y = headR*.85; head.add(c);
+      const v = new THREE.Mesh(new THREE.BoxGeometry(headR*1.3, .012, headR*.7), toon(0x111111)); v.position.set(0, headR*.55, headR*1.0); head.add(v); }
+    if (p.hat === 'nurse'){ const c = new THREE.Mesh(new THREE.BoxGeometry(headR*1.2, headR*.45, headR*.9), toon(0xffffff)); c.position.y = headR*.95; head.add(c); }
+  }
+  // arms
+  const sleeve = ['singlet','saree'].includes(p.outfit) ? skin : top;
+  const mkArm = sx => {
+    const sh = new THREE.Group(); sh.position.set(sx*(.125*b + .02), torsoL - .02, 0); sh.rotation.z = sx*.07; torso.add(sh);
+    const up = new THREE.Mesh(new THREE.CylinderGeometry(.03*b, .027*b, upper, 6), sleeve); up.position.y = -upper/2; sh.add(up);
+    const el = new THREE.Group(); el.position.y = -upper; sh.add(el);
+    const fo = new THREE.Mesh(new THREE.CylinderGeometry(.026*b, .022*b, fore, 6), ['shirt','singlet','apron','dress','cheongsam'].includes(p.outfit) ? skin : sleeve); fo.position.y = -fore/2; el.add(fo);
+    const hand = new THREE.Group(); hand.position.y = -fore; el.add(hand);
+    const hm = new THREE.Mesh(new THREE.SphereGeometry(.03, 6, 5), skin); hand.add(hm);
+    return [sh, el, hand];
+  };
+  const [shL, elL, handL] = mkArm(-1), [shR, elR, handR] = mkArm(1);
+  // things they carry
+  if (p.acc === 'briefcase'){ const c = new THREE.Mesh(new THREE.BoxGeometry(.05, .17, .24), toon(0x3a2418)); c.position.y = -.09; ink(c, .015); handL.add(c); }
+  if (p.acc === 'basket'){ const c = new THREE.Mesh(new THREE.CylinderGeometry(.11, .08, .1, 10), toon(0x9b7a4a)); c.position.y = -.05; ink(c, .015); handL.add(c);
+    const fill = new THREE.Mesh(new THREE.SphereGeometry(.09, 8, 5, 0, Math.PI*2, 0, Math.PI/2), toon(p.job === 'flower seller' ? 0xd23a5a : 0x6fa04a)); fill.position.y = 0; handL.add(fill); }
+  if (p.acc === 'newspaper'){ const n = new THREE.Mesh(new THREE.BoxGeometry(.03, .2, .14), toon(0xd8d2c4)); n.position.set(.02, -.04, 0); handL.add(n); }
+  if (p.acc === 'books'){ const n = new THREE.Mesh(new THREE.BoxGeometry(.06, .16, .12), toon(p.accent)); n.position.set(.02, -.03, 0); handL.add(n); }
+  if (p.acc === 'bag'){ const n = new THREE.Mesh(new THREE.BoxGeometry(.05, .12, .15), toon(0x4a3426)); n.position.set(0, -.08, 0); handL.add(n); }
+  let umb = null;
+  if (p.umbrella){
+    umb = new THREE.Group(); umb.position.set(.04, shY + .22*H, .06); body.add(umb);
+    const cn = new THREE.Mesh(new THREE.ConeGeometry(.5, .2, 10), toon(p.accent)); cn.position.y = .22; ink(cn, .02); umb.add(cn);
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(.012, .012, .5, 4), toon(0x16171a)); pole.position.y = 0; umb.add(pole);
+  }
+  let ember = null;
+  if (p.smoker){ ember = new THREE.Mesh(new THREE.SphereGeometry(.012, 5, 4), new THREE.MeshBasicMaterial({ color:0xff7a2a })); ember.position.set(0, -.01, .03); handR.add(ember); ember.visible = false; }
+  torso.rotation.x = p.hunch;
+  return { root, body, torso, head, hipL, hipR, kneeL, kneeR, shL, shR, elL, elR, umb, ember, eye: shY + neck + headR };
+}
+
+function createNPC(seed, overrides){
+  const rng = mulberry(seed * 7919 + 13);
+  const profile = generateProfile(rng, overrides || {});
+  const rig = buildRig(profile);
+  return { profile, rig };
+}
+
+const CROSS = [-11.6,-2.6,2.6,11.6];
+function makeWalkers(rand){
+  G.walkers = [];
+  const pickMat = new THREE.MeshBasicMaterial();
+  // a few fixed characters for the street's regulars; everyone else is generated
+  const regulars = [{ job:'reporter at Warta Malam', gender:'m', community:'chinese', temper:'cynical' }, { job:'kuih seller', community:'malay', gender:'f', age:58 }, { job:'beat constable' }];
+  const count = G.mobile ? 14 : 22;
+  for (let k=0;k<count;k++){
+    const npc = createNPC(1000 + k*37, regulars[k]);
+    const g = npc.rig.root;
+    const pk = new THREE.Mesh(new THREE.CylinderGeometry(.5, .5, 1.8, 6), pickMat); pk.visible = false; pk.position.y = .9; g.add(pk);
+    const axis = k % 2 ? 'x' : 'z', c = CROSS[k % 4];
+    const p = rnd(-13,13); if (axis === 'x') g.position.set(p, .2, c); else g.position.set(c, .2, p);
+    G.scene.add(g);
+    const w = { g, rig:npc.rig, profile:npc.profile, axis, dir: rand() < .5 ? -1 : 1, v:npc.profile.pace, bob:rand()*6, pause:0, idle:null, pick:pk, idx:k, recent:[], thoughts:0, followed:0 };
+    pk.userData.walker = w; G.walkers.push(w);
+  }
+}
+function lerpTo(o, prop, v, k){ o[prop] += (v - o[prop]) * k; }
+function animateRig(w, dt, time, moving){
+  const r = w.rig, p = w.profile, k = Math.min(1, dt*8);
+  if (moving){
+    const ph = w.bob, a = p.stride;
+    r.hipL.rotation.x = Math.sin(ph)*a; r.hipR.rotation.x = -Math.sin(ph)*a;
+    r.kneeL.rotation.x = Math.max(0, -Math.cos(ph))*a*1.5; r.kneeR.rotation.x = Math.max(0, Math.cos(ph))*a*1.5;
+    const carryL = p.acc && p.acc !== null;
+    lerpTo(r.shL.rotation, 'x', carryL ? Math.sin(ph)*a*.25 : -Math.sin(ph)*a*.8, k); lerpTo(r.elL.rotation, 'x', carryL ? 0 : -.25, k);
+    if (p.umbrella){ lerpTo(r.shR.rotation, 'x', -.75, k); lerpTo(r.elR.rotation, 'x', -1.1, k); }
+    else { lerpTo(r.shR.rotation, 'x', Math.sin(ph)*a*.8, k); lerpTo(r.elR.rotation, 'x', -.25, k); }
+    r.body.position.y = Math.abs(Math.cos(ph))*.022; r.torso.rotation.y = Math.sin(ph)*.07;
+    lerpTo(r.head.rotation, 'y', 0, k*.5);
+    if (r.ember) r.ember.visible = false;
+  } else {
+    ['hipL','hipR','kneeL','kneeR'].forEach(n => lerpTo(r[n].rotation, 'x', 0, k));
+    lerpTo(r.shL.rotation, 'x', 0, k); lerpTo(r.elL.rotation, 'x', -.1, k);
+    r.body.position.y = 0; r.torso.rotation.y *= .9;
+    if (w.idle === 'smoke' && !p.umbrella){
+      const puff = (Math.sin(time*1.1 + w.idx) + 1)/2;
+      lerpTo(r.shR.rotation, 'x', -.5 - puff*.7, k); lerpTo(r.elR.rotation, 'x', -1.6*puff - .3, k);
+      if (r.ember){ r.ember.visible = true; r.ember.material.color.setHex(0xff7a2a).multiplyScalar(1 + puff*1.5); }
+      lerpTo(r.head.rotation, 'y', Math.sin(time*.3 + w.idx)*.3, k*.3);
+    } else {
+      if (p.umbrella){ lerpTo(r.shR.rotation, 'x', -.75, k); lerpTo(r.elR.rotation, 'x', -1.1, k); }
+      else { lerpTo(r.shR.rotation, 'x', 0, k); lerpTo(r.elR.rotation, 'x', -.1, k); }
+      lerpTo(r.head.rotation, 'y', Math.sin(time*.6 + w.idx*1.7)*.75, k*.3);
+    }
+  }
+}
+function npcStep(w, dt, vis, time){
+  const pos = w.g.position;
+  if (w.pause > 0){
+    w.pause -= dt*vis;
+    animateRig(w, dt, time, false);
+    return;
+  }
+  const key = w.axis, prev = pos[key];
+  pos[key] += w.dir*w.v*dt*vis; w.bob += dt*w.v*7.5*vis;
+  for (const c2 of CROSS){
+    if ((prev - c2)*(pos[key] - c2) < 0 && Math.random() < .4){ pos[key] = c2; w.axis = key === 'x' ? 'z' : 'x'; w.dir = Math.random() < .5 ? -1 : 1; break; }
+  }
+  const k2 = w.axis; if (Math.abs(pos[k2]) > 13){ pos[k2] = Math.sign(pos[k2])*13; w.dir = -w.dir; }
+  pos.y = .2;
+  const yaw = w.axis === 'x' ? (w.dir > 0 ? Math.PI/2 : -Math.PI/2) : (w.dir > 0 ? 0 : Math.PI);
+  w.g.rotation.y += angDiff(w.g.rotation.y, yaw) * Math.min(1, dt*6);
+  if (vis > 0 && Math.random() < dt*vis*.045){ w.pause = rnd(2, 6); w.idle = w.profile.smoker && Math.random() < .55 ? 'smoke' : 'look'; }
+  animateRig(w, dt, time, true);
+}
+
+function makePolice(){
+  const g = buildCar(0xe9e8e4, 0x1b2a55);
+  G.pRed = new THREE.MeshBasicMaterial({ color:0xff1020 }); G.pBlue = new THREE.MeshBasicMaterial({ color:0x1a40ff });
+  const r = new THREE.Mesh(new THREE.BoxGeometry(.25,.14,.3), G.pRed); r.position.set(-.1,1.24,-.2); g.add(r);
+  const bl = new THREE.Mesh(new THREE.BoxGeometry(.25,.14,.3), G.pBlue); bl.position.set(-.1,1.24,.2); g.add(bl);
+  G.pLight = new THREE.PointLight(0xff0000, 0, 14, 1.3); G.pLight.position.set(0,2,0); g.add(G.pLight);
+  g.visible = false; G.scene.add(g); G.police = g;
+}
+function makeFire(){
+  const N = 90;
+  G.fire = { N, pos:new Float32Array(N*3), life:new Float32Array(N), vy:new Float32Array(N) };
+  const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.BufferAttribute(G.fire.pos,3));
+  G.fireMesh = new THREE.Points(geo, new THREE.PointsMaterial({ map:G.glowTex, color:0xff6a10, size:26, sizeAttenuation:false, transparent:true, opacity:.9, blending:THREE.AdditiveBlending, depthWrite:false }));
+  G.fireMesh.frustumCulled = false; G.fireMesh.visible = false; G.scene.add(G.fireMesh);
+  G.smoke = { pos:new Float32Array(N*3) };
+  const sgeo = new THREE.BufferGeometry(); sgeo.setAttribute('position', new THREE.BufferAttribute(G.smoke.pos,3));
+  G.smokeMesh = new THREE.Points(sgeo, new THREE.PointsMaterial({ map:G.glowTex, color:0x2a2a2a, size:60, sizeAttenuation:false, transparent:true, opacity:.5, depthWrite:false }));
+  G.smokeMesh.frustumCulled = false; G.smokeMesh.visible = false; G.scene.add(G.smokeMesh);
+  G.fireLight = new THREE.PointLight(0xff6418, 0, 16, 1.4); G.scene.add(G.fireLight);
+}
+
+/* ---------- post: noir grade (or colour), bloom, grain ---------- */
+function initPost(){
+  const R = G.renderer;
+  const hdr = R.extensions.has('EXT_color_buffer_float');
+  const opts = { minFilter:THREE.LinearFilter, magFilter:THREE.LinearFilter, format:THREE.RGBAFormat, type: hdr ? THREE.HalfFloatType : THREE.UnsignedByteType };
+  G.rtScene = new THREE.WebGLRenderTarget(4,4,opts);
+  G.rtScene.depthTexture = new THREE.DepthTexture(4,4);
+  // Fog of war mask: 8x8 cells of 14 units, centred on the block grid. The outer ring stays fogged forever.
+  G.fog = { cur:new Float32Array(64), data:new Uint8Array(256), primed:false };
+  G.fog.tex = new THREE.DataTexture(G.fog.data, 8, 8, THREE.RGBAFormat);
+  G.fog.tex.minFilter = G.fog.tex.magFilter = THREE.LinearFilter; G.fog.tex.needsUpdate = true;
+  G.rtA = new THREE.WebGLRenderTarget(4,4,opts); G.rtB = new THREE.WebGLRenderTarget(4,4,opts);
+  const vs = 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }';
+  G.mBright = new THREE.ShaderMaterial({ uniforms:{ t:{value:null} }, vertexShader:vs, depthTest:false, depthWrite:false,
+    fragmentShader:'uniform sampler2D t; varying vec2 vUv; void main(){ vec3 c = texture2D(t, vUv).rgb; float m = max(c.r, max(c.g, c.b)); gl_FragColor = vec4(c * smoothstep(0.75, 1.6, m), 1.0); }' });
+  G.mBlur = new THREE.ShaderMaterial({ uniforms:{ t:{value:null}, dir:{value:new THREE.Vector2()} }, vertexShader:vs, depthTest:false, depthWrite:false,
+    fragmentShader:`uniform sampler2D t; uniform vec2 dir; varying vec2 vUv;
+      void main(){ vec3 s = texture2D(t,vUv).rgb*0.227027;
+        s += texture2D(t,vUv+dir*1.3846).rgb*0.316216; s += texture2D(t,vUv-dir*1.3846).rgb*0.316216;
+        s += texture2D(t,vUv+dir*3.2308).rgb*0.070270; s += texture2D(t,vUv-dir*3.2308).rgb*0.070270;
+        gl_FragColor = vec4(s,1.0); }` });
+  G.mComp = new THREE.ShaderMaterial({ uniforms:{ tS:{value:null}, tB:{value:null}, time:{value:0}, flash:{value:0}, raid:{value:0}, res:{value:new THREE.Vector2(1,1)}, mode:{value:0},
+      tD:{value:G.rtScene.depthTexture}, tFog:{value:G.fog.tex}, invVP:{value:new THREE.Matrix4()}, fogOn:{value:1} },
+    vertexShader:vs, depthTest:false, depthWrite:false,
+    fragmentShader:`uniform sampler2D tS, tB, tD, tFog; uniform float time, flash, raid, mode, fogOn; uniform vec2 res; uniform mat4 invVP; varying vec2 vUv;
+      float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233))) * 43758.5453); }
+      float vnoise(vec2 p){ vec2 i = floor(p), f = fract(p), u = f*f*(3.0-2.0*f);
+        return mix(mix(hash(i), hash(i+vec2(1.0,0.0)), u.x), mix(hash(i+vec2(0.0,1.0)), hash(i+vec2(1.0,1.0)), u.x), u.y); }
+      vec3 fogOver(vec3 col, vec2 uv){
+        float z = texture2D(tD, uv).r;
+        vec4 w = invVP * vec4(uv*2.0-1.0, z*2.0-1.0, 1.0);
+        vec2 xz = w.xz / w.w;
+        float n = (vnoise(xz*0.18 + time*vec2(0.05,0.03)) + 0.5*vnoise(xz*0.41 - time*vec2(0.04,0.02))) / 1.5;
+        float open = texture2D(tFog, (xz + (n-0.5)*1.8 + 56.0) / 112.0).r;
+        float f = z >= 0.9999 ? 1.0 : 1.0 - smoothstep(0.32, 0.68, open);
+        return mix(col, mix(vec3(0.02,0.022,0.03), vec3(0.17,0.18,0.2), n*n), f*0.98);
+      }
+      void main(){
+        vec2 uv = vUv, d = uv - 0.5; float r2 = dot(d,d);
+        vec2 ab = d * 0.005 * r2 * 4.0 * (1.0 - mode);
+        vec3 c = vec3(texture2D(tS, uv + ab).r, texture2D(tS, uv).g, texture2D(tS, uv - ab).b);
+        c += texture2D(tB, uv).rgb * 1.3;
+        float mx = max(c.r, max(c.g, c.b)), mn = min(c.r, min(c.g, c.b));
+        float sat = (mx - mn) / (mx + 1e-4);
+        float lum = dot(c, vec3(0.299, 0.587, 0.114));
+        float kNoir = smoothstep(0.55, 0.85, sat) * smoothstep(0.35, 0.8, mx);
+        float k = mix(kNoir, 1.0, mode);
+        vec3 grey = vec3(lum) * vec3(0.95, 0.98, 1.05);
+        vec3 col = mix(grey, c, k);
+        col = mix(vec3(lum), col, 1.0 + 0.18*mode);
+        col = col / (col + vec3(0.55)) * 1.55;
+        col = clamp(col, 0.0, 1.0);
+        col = mix(col, col*col*(3.0-2.0*col), mix(0.6, 0.25, mode));
+        col = pow(max(col, 0.0), vec3(mix(1.12, 0.95, mode)));
+        if (fogOn > 0.5) col = fogOver(col, uv);
+        col += flash * vec3(0.8, 0.86, 1.0) * (1.0 - r2*1.5);
+        vec3 siren = mix(vec3(1.0,0.05,0.08), vec3(0.08,0.2,1.0), step(0.5, fract(time*1.7)));
+        col += raid * siren * 0.10 * (0.6 + r2*2.0);
+        float vig = smoothstep(0.95, 0.15, r2 * 2.3); col *= mix(mix(0.3, 0.7, mode), 1.0, vig);
+        col += (hash(uv * res + fract(time * 17.0) * 91.0) - 0.5) * mix(0.075, 0.03, mode);
+        col *= 0.98 + 0.02 * sin(uv.y * res.y * 1.4 + time * 2.0);
+        gl_FragColor = vec4(col, 1.0);
+      }` });
+  G.quad = new THREE.Mesh(new THREE.PlaneGeometry(2,2), G.mComp); G.quad.frustumCulled = false;
+  G.qScene = new THREE.Scene(); G.qScene.add(G.quad); G.qCam = new THREE.Camera();
+}
+// Inside the block grid a cell shows if it's unlocked or next to an unlocked block, the same rule as blockAdjacent.
+// Scenery outside the grid can't be bought, so diagonals count: Sentul reveals the clock tower.
+function fogCellOpen(x, z){
+  const inGrid = Math.abs(x) < 28 && Math.abs(z) < 28;
+  return unlockedCenters().some(([ux,uz]) => { const dx = Math.abs(ux-x), dz = Math.abs(uz-z); return inGrid ? dx + dz <= 14 : Math.max(dx,dz) <= 14; });
+}
+function fogTick(dt){
+  const F = G.fog, k = F.primed ? Math.min(1, dt*1.4) : 1; let dirty = false;
+  for (let iz=0;iz<8;iz++) for (let ix=0;ix<8;ix++){
+    const c = iz*8 + ix, goal = fogCellOpen(ix*14 - 49, iz*14 - 49) ? 1 : 0;
+    if (F.cur[c] === goal) continue;
+    F.cur[c] = Math.abs(goal - F.cur[c]) < .004 ? goal : F.cur[c] + (goal - F.cur[c])*k;
+    F.data[c*4] = F.data[c*4+1] = F.data[c*4+2] = Math.round(F.cur[c]*255); F.data[c*4+3] = 255; dirty = true;
+  }
+  F.primed = true; if (dirty) F.tex.needsUpdate = true;
+  let flipped = false;
+  G.towers.forEach(t => { const open = !!G.pov || F.cur[t.cell] > 0; if (open !== t.open){ t.open = t.g.visible = open; flipped = true; } });
+  if (flipped){ const none = new THREE.Matrix4().makeScale(0,0,0); G.winPositions.forEach((w,k) => G.winMesh.setMatrixAt(k, G.towers[w.t].open ? w.m : none)); G.winMesh.instanceMatrix.needsUpdate = true; }
+}
+function fogClearAt(p){ const ix = Math.floor((p.x+56)/14), iz = Math.floor((p.z+56)/14); return ix >= 0 && ix < 8 && iz >= 0 && iz < 8 && G.fog.cur[iz*8+ix] > .5; }
+function pass(mat, target){ G.quad.material = mat; G.renderer.setRenderTarget(target); G.renderer.render(G.qScene, G.qCam); }
+
+function resize(){
+  const w = innerWidth, h = innerHeight; G.renderer.setSize(w, h, false);
+  const v = new THREE.Vector2(); G.renderer.getDrawingBufferSize(v);
+  G.rtScene.setSize(v.x, v.y); G.rtA.setSize(Math.max(1,v.x>>1), Math.max(1,v.y>>1)); G.rtB.setSize(Math.max(1,v.x>>1), Math.max(1,v.y>>1));
+  G.mComp.uniforms.res.value.set(v.x, v.y);
+  G.aspect = w/h; updateCamera();
+  if (G.persp){ G.persp.aspect = G.aspect; G.persp.updateProjectionMatrix(); }
+  sizeCS();
+}
+function sizeCS(){ const cv = $('csCanvas'); cv.width = Math.round(innerWidth*Math.min(devicePixelRatio,1.5)); cv.height = Math.round(innerHeight*Math.min(devicePixelRatio,1.5)); }
+function updateCamera(){
+  const cam = G.camera, view = (G.aspect < 1 ? 46 : 32) / G.zoom;
+  cam.left = -view*G.aspect/2; cam.right = view*G.aspect/2; cam.top = view/2; cam.bottom = -view/2; cam.updateProjectionMatrix();
+  cam.position.copy(G.target).add(G.offset); cam.lookAt(G.target);
+}
+
+/* ---------- input ---------- */
+function initInput(){
+  const cv = $('gl'), ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+  G.persp = new THREE.PerspectiveCamera(64, G.aspect || 1, .05, 220);
+  let down = null, moved = false;
+  const cast = (cx, cy) => { ndc.set(cx/innerWidth*2-1, -(cy/innerHeight)*2+1); ray.setFromCamera(ndc, G.pov ? G.persp : G.camera); };
+  const pickLot = () => { const hit = ray.intersectObjects(G.lots.filter(l => l.root.visible).map(l => l.pick), false)[0]; return hit ? hit.object.userData.lot : -1; };
+  const pickWalker = () => { const hit = ray.intersectObjects(G.walkers.filter(w => G.pov ? w !== G.pov.w : fogClearAt(w.g.position)).map(w => w.pick), false)[0]; return hit ? hit.object.userData.walker : null; };
+  cv.addEventListener('pointerdown', e => { down = { x:e.clientX, y:e.clientY, tx:G.target.x, tz:G.target.z, look:G.pov ? G.pov.look : 0, pitch:G.pov ? G.pov.pitch : 0 }; moved = false; try{ cv.setPointerCapture(e.pointerId); }catch(err){} });
+  cv.addEventListener('pointermove', e => {
+    if (down){
+      const dx = e.clientX - down.x, dy = e.clientY - down.y;
+      if (Math.hypot(dx,dy) > 6) moved = true;
+      if (!moved) return;
+      if (G.pov){ G.pov.look = clamp(down.look - dx*.005, -2.4, 2.4); G.pov.pitch = clamp(down.pitch - dy*.004, -.5, .7); G.pov.dragging = true; return; }
+      const wpp = (G.camera.right - G.camera.left) / innerWidth;
+      const right = new THREE.Vector3(1,0,0).applyQuaternion(G.camera.quaternion); right.y = 0; right.normalize();
+      const fwd = new THREE.Vector3(0,0,-1).applyQuaternion(G.camera.quaternion); fwd.y = 0; fwd.normalize();
+      const tilt = 1 / G.offset.clone().normalize().y;
+      G.camGoal = null;
+      G.target.x = clamp(down.tx - right.x*dx*wpp + fwd.x*dy*wpp*tilt, -30, 30);
+      G.target.z = clamp(down.tz - right.z*dx*wpp + fwd.z*dy*wpp*tilt, -30, 30);
+      updateCamera();
+    } else {
+      cast(e.clientX, e.clientY);
+      const w = pickWalker(), tag = $('tag');
+      if (w){ tag.hidden = false; tag.innerHTML = `<b>${w.profile.name}</b>, ${w.profile.age} · ${w.profile.job}<small>${TEMPERS[w.profile.temper].label} · click to see through their eyes</small>`; tag.style.left = e.clientX + 'px'; tag.style.top = e.clientY + 'px'; cv.style.cursor = 'zoom-in'; G.hover = -1; return; }
+      tag.hidden = true;
+      if (G.pov){ cv.style.cursor = 'grab'; return; }
+      const k = pickLot(); G.hover = k; cv.style.cursor = k >= 0 ? 'pointer' : 'grab';
+      if (k >= 0 && S && S.lots[k].owner === 'locked'){ const b = blockOf(k); tag.hidden = false; tag.innerHTML = `<b>${BLOCKS[b].name}</b><small>${blockAdjacent(b) ? 'Click to see the headman\'s price' : 'Not next to your turf yet'}</small>`; tag.style.left = e.clientX + 'px'; tag.style.top = e.clientY + 'px'; }
+    }
+  });
+  cv.addEventListener('pointerup', e => {
+    if (G.pov) G.pov.dragging = false;
+    if (down && !moved){
+      cast(e.clientX, e.clientY);
+      const w = pickWalker();
+      if (w && S){ enterPOV(w); }
+      else if (!G.pov){ const k = pickLot(); if (k >= 0 && S && canCollect(k)) collect(k); else selectLot(k); }
+    }
+    down = null;
+  });
+  cv.addEventListener('pointerleave', () => { $('tag').hidden = true; });
+  cv.addEventListener('wheel', e => { e.preventDefault(); if (G.pov) return; G.zoom = clamp(G.zoom * (e.deltaY > 0 ? .9 : 1.1), .42, 2.4); updateCamera(); }, { passive:false });
+}
+function selectLot(k){
+  if (!S) return;
+  selected = k; if (k >= 0) sfx.click();
+  renderFile();
+}
+function screenOf(i){
+  if (!G.ok) return { x:innerWidth/2, y:innerHeight/2 };
+  const V = G.lots[i], v = new THREE.Vector3(V.x, V.top + .4, V.z).project(G.camera);
+  return { x:(v.x+1)/2*innerWidth, y:(1-v.y)/2*innerHeight };
+}
+
+/* ---------- per-frame scene update ---------- */
+let colTmp = null;
+function noise1(x){ return (Math.sin(x*1.7)+Math.sin(x*3.1+1.3)+Math.sin(x*7.3+.4))/3; }
+function elastic(p){ return p <= 0 ? 0 : p >= 1 ? 1 : Math.pow(2,-10*p) * Math.sin((p*10 - .75)*(2*Math.PI/3)) + 1; }
+function syncScene(time, dt, hourF){
+  const h = hourF % 24, ph = phaseOf(Math.floor(h));
+  const night = (ph === 'night') ? 1 : (ph === 'dusk') ? .75 : (ph === 'morning') ? .45 : .15;
+  const bright = LOOK.colour ? 1.35 : 1;
+  G.hemi.intensity = (.22 + (1-night)*.55) * bright * LIGHT_K; G.sun.intensity = (.25 + (1-night)*.75) * bright * LIGHT_K;
+  G.sun.color.setHex(night > .6 ? 0x8d9bc0 : 0xfff0d8);
+  const sky = night > .6 ? 0x07080b : 0x23262c; G.renderer.setClearColor(sky); G.scene.fog.color.setHex(sky);
+  G.lamps.forEach(l => { l.L.intensity = night*.9*LIGHT_K; l.glow.material.opacity = .55*night; l.pool.material.opacity = .4*night; });
+
+  G.lots.forEach((V, i) => {
+    const l = S.lots[i];
+    V.root.visible = !!G.pov || i < 16 || blockVisible(blockOf(i));
+    const type = l.biz ? l.biz.type : null;
+    const key = `${type}|${l.burned}|${l.owner}|${l.biz ? l.biz.tier : 0}`;
+    if (V.cur !== key){ const first = V.cur === undefined; V.cur = key; buildPlot(V, l); bake(V.bld); V.pop = first ? 1 : 0; }
+    if (V.pop < 1){ V.pop = Math.min(1, V.pop + dt*1.25); const s = elastic(V.pop); V.bld.scale.set(1 + (1-s)*.25, Math.max(.01, s), 1 + (1-s)*.25); }
+    else V.bld.scale.set(1,1,1);
+    const open = l.biz && !isClosed(l.biz) && (l.owner === 'rival' || l.biz.staff.length > 0);
+    let inten = 0, base = 0x000000;
+    if (type){ base = BIZ[type].color; inten = open ? (.35 + .65*night) : .04; }
+    else if (l.owner === 'sale'){ base = 0xbfbfbf; inten = .3; }
+    if (V.flick && open){ const n = noise1(time*6 + V.seed); if (n > .55) inten *= .15; }
+    if (l.biz && l.biz.undercutUntil > S.t && l.owner === 'you') inten *= .75 + .25*Math.sin(time*9);
+    colTmp.setHex(base).multiplyScalar(.25 + inten*2.2);
+    V.signMats.forEach(m => m.color.copy(colTmp));
+    V.lanterns.forEach(m => m.color.setHex(type === 'den' ? 0xff2238 : 0xffd36a).multiplyScalar(open ? .5 + 1.4*night : .25));
+    V.poolMat.color.setHex(base).multiplyScalar(type ? inten*.75 : 0); V.pool.visible = !!type;
+    V.doorMat.color.setHex(open ? 0xffc985 : 0x0c0d0f).multiplyScalar(open ? .55 + .5*night : 1);
+    const buyable = l.owner === 'locked' && blockAdjacent(blockOf(i));
+    const clan = l.owner === 'you' ? 0xe0283a : l.owner === 'rival' ? 0x30c8d8 : l.owner === 'locked' ? 0x2a2c30 : 0x55585e;
+    V.curbMat.color.setHex(clan); if (buyable) V.curbMat.color.setRGB(.5,.5,.52).multiplyScalar(.7 + .5*Math.sin(time*3));
+    if (l.owner === 'locked') return;
+    V.flagMat.color.setHex(l.owner === 'you' ? 0xff2a3d : 0x30c8d8).multiplyScalar(1.3);
+    V.glowMat.color.setHex(l.owner === 'sale' || l.owner === 'locked' ? 0 : clan).multiplyScalar((.25 + .45*night) * (.8 + .2*Math.sin(time*1.3 + i)) * (selected === i ? 1.6 : 1));
+    V.glow.visible = l.owner !== 'sale';
+    const ready = canCollect(i);
+    V.bubble.visible = ready && !G.pov;
+    if (ready) V.bubble.position.set(0, V.top + .5 + Math.sin(time*3 + i)*.15, 0);
+  });
+
+  G.hutMats.forEach(m => m.emissiveIntensity = .15 + night*.75);
+  G.markers.forEach((m, b) => { m.visible = !G.pov && !!S && !S.blocks.includes(b) && blockAdjacent(b); if (m.visible){ const sc = 2.2 + Math.sin(time*3 + b)*.2; m.scale.set(sc, sc, 1); m.position.y = 8.5 + Math.sin(time*2 + b)*.3; } });
+  if (G.camGoal){ G.target.x += (G.camGoal.x - G.target.x)*Math.min(1, dt*2.5); G.target.z += (G.camGoal.z - G.target.z)*Math.min(1, dt*2.5); updateCamera(); if (Math.hypot(G.camGoal.x - G.target.x, G.camGoal.z - G.target.z) < .05) G.camGoal = null; }
+  const showBox = (o, k) => { if (k < 0){ o.visible = false; return; } const V = G.lots[k]; o.visible = true; o.position.set(V.x, .5, V.z); };
+  if (G.pov){ G.sel.visible = G.hov.visible = false; } else {
+  showBox(G.sel, selected); G.sel.material.opacity = .65 + .3*Math.sin(time*4);
+  showBox(G.hov, G.hover >= 0 && G.hover !== selected ? G.hover : -1); }
+
+  // rain
+  const R = G.rain, p = R.pos, wind = .9;
+  for (let k=0;k<R.N;k++){
+    const dy = R.v[k]*dt; p[k*6+1] -= dy; p[k*6+4] -= dy; p[k*6] -= wind*dt*2; p[k*6+3] -= wind*dt*2;
+    if (p[k*6+1] < .2){
+      const s = G.splash, j = Math.floor(Math.random()*s.N); s.pos[j*3] = p[k*6]; s.pos[j*3+1] = .25; s.pos[j*3+2] = p[k*6+2]; s.life[j] = .12;
+      resetDrop(k, false);
+    }
+  }
+  G.rainMesh.geometry.attributes.position.needsUpdate = true;
+  const s = G.splash; for (let j=0;j<s.N;j++){ s.life[j] -= dt; if (s.life[j] <= 0) s.pos[j*3+1] = -10; }
+  G.splashMesh.geometry.attributes.position.needsUpdate = true;
+
+  const vis = speed === 0 ? .25 : Math.min(speed, 2);
+  G.cars.forEach(c => { const pos = c.g.position, key = c.axis; pos[key] += c.dir*c.v*dt*vis; if (pos[key] > 42) pos[key] = -42; if (pos[key] < -42) pos[key] = 42; });
+  G.walkers.forEach(w => npcStep(w, dt, vis, time));
+  povTick(time, dt);
+
+  if (S.policeLot >= 0){
+    const V = G.lots[S.policeLot]; G.police.visible = true; G.police.position.set(V.x, .2, V.z + (V.z > 0 ? -3.4 : 3.4)); G.police.rotation.y = 0;
+    const blink = Math.floor(time*3.4) % 2; G.pLight.color.setHex(blink ? 0xff1020 : 0x2040ff); G.pLight.intensity = 3.2*LIGHT_K;
+    G.pRed.color.setHex(blink ? 0xff2030 : 0x300000); G.pBlue.color.setHex(blink ? 0x000830 : 0x3060ff);
+  } else { G.police.visible = false; G.pLight.intensity = 0; }
+
+  const fire = S.fires[S.fires.length-1];
+  if (fire){
+    const V = G.lots[fire.lot]; G.fireMesh.visible = G.smokeMesh.visible = true;
+    const F = G.fire;
+    for (let k=0;k<F.N;k++){
+      F.life[k] -= dt;
+      if (F.life[k] <= 0){ F.life[k] = rnd(.6,1.4); F.vy[k] = rnd(1.4,3); F.pos[k*3] = V.x + rnd(-1.8,1.8); F.pos[k*3+1] = rnd(.4, 3.2); F.pos[k*3+2] = V.z + rnd(-1.8,1.8);
+        G.smoke.pos[k*3] = F.pos[k*3]; G.smoke.pos[k*3+1] = F.pos[k*3+1] + 1; G.smoke.pos[k*3+2] = F.pos[k*3+2]; }
+      F.pos[k*3+1] += F.vy[k]*dt; F.pos[k*3] += Math.sin(time*3 + k)*dt*.4;
+      G.smoke.pos[k*3+1] += dt*2.2; G.smoke.pos[k*3] -= dt*.8;
+    }
+    G.fireMesh.geometry.attributes.position.needsUpdate = true; G.smokeMesh.geometry.attributes.position.needsUpdate = true;
+    G.fireLight.position.set(V.x, 2.5, V.z + 2); G.fireLight.intensity = (3 + Math.sin(time*17)*.8 + Math.sin(time*7)*.6) * LIGHT_K;
+  } else { G.fireMesh.visible = G.smokeMesh.visible = false; G.fireLight.intensity = 0; }
+
+  if (night > .5 && time > (G.nextBolt || 8)){ G.flash = 1; G.nextBolt = time + rnd(18, 45); sfx.thunder(rnd(.6,2.2), rnd(.6,1)); }
+  G.flash = Math.max(0, (G.flash||0) - dt*2.6);
+  const strobe = G.flash > .6 ? G.flash : G.flash * (Math.sin(time*60) > 0 ? 1 : .2);
+  G.sun.intensity += strobe*2.2*LIGHT_K;
+  G.mComp.uniforms.flash.value = strobe*.22;
+  G.mComp.uniforms.raid.value = S.policeLot >= 0 ? 1 : 0;
+  G.mComp.uniforms.time.value = time;
+  fogTick(dt);
+  G.mComp.uniforms.mode.value += ((LOOK.colour ? 1 : 0) - G.mComp.uniforms.mode.value) * Math.min(1, dt*4);
+}
+/* ---------- bystander POV & inner voice ---------- */
+function angDiff(a, b){ let d = (b - a) % (Math.PI*2); if (d > Math.PI) d -= Math.PI*2; if (d < -Math.PI) d += Math.PI*2; return d; }
+const TYPE_LINES = {
+  den:['The click of mahjong tiles behind the shutters. It never stops before dawn.','Old men shouting "pong!" through a back door. Somebody\'s rent money, gone.'],
+  bola:['Men crowded round a radio for the Selangor score, betting slips in their fists.','The bola shop chalkboard: Selangor 2, Perak 1. Somebody\'s crying in there.'],
+  ekor:['Somebody\'s grandmother just put her pension on 4-7-1-3.','A dream about a snake means 4-1-2-8. Everyone knows that.'],
+  smokes:['Thai cigarettes by the carton, two ringgit cheaper than the shop.','Cartons stacked to the ceiling. Customs never comes this far up the road.'],
+  fakes:['A gold Rolex for thirty ringgit. It\'ll stop by Friday.','Michael Jackson cassettes, two ringgit. The cover\'s printed crooked.'],
+  ahlong:['Red paint on a shutter down the road. Somebody didn\'t pay the Ah Long.','PINJAMAN WANG, easy terms. The terms are your kneecaps.'],
+  bar:['The smell of arak through the back door. Somebody laughing too loudly.','Bottles off the Port Klang lorries, no stamps, no questions.'],
+  parlour:['Pink light upstairs. Nobody on this street ever says what goes on up there.','Men in office shirts going up the back stairs, looking at their shoes.'],
+  chop:['A Mercedes went in whole last night. It\'ll leave in pieces.','Sparks and the smell of hot metal. Somebody\'s car is becoming somebody else\'s.'],
+  powder:['Kids queuing at a herbal shop at midnight. Herbs. Sure.','The herbalist hasn\'t sold a single herb all year. Business is booming.'],
+  casino:['A Datuk\'s car outside the gambling hall again, driver asleep at the wheel.','Chandeliers in Chow Kit. Somebody\'s losing a fortune upstairs.'],
+  front:['Best kopi-o on the street. Funny how nobody minds the till.','The kopitiam is always half empty and never short of money.'],
+  laundry:['A laundry with nothing hanging on the line. Funny thing, that.','The dobi machines spin all night. Nobody ever collects any clothes.'],
+  sale:['Another shophouse with its shutters down. The landlord wants cash.','A DIJUAL sign, faded. Nobody wants a shop on a street with two gangs.'],
+  burned:['Wet ash and a black doorway. Somebody\'s business ended in one night.','You can still smell the petrol under the rain.'],
+  empty:['A cleared lot with a red flag on it. Somebody new is buying up the street.'],
+  locked:['Old shophouses, old families. They say the new boss has been asking the headman about this row.'],
+};
+const OWNER_LINES = {
+  you:['Red neon. That\'s the new boss from Ipoh.','They say the boss from Ipoh pays the old men\'s coffee tabs.','The red outfit keeps the drunks off this corner. Better than the police do.'],
+  rival:['Teal light means Geng Lorong ground. Eyes down, keep walking.','Mat Botak\'s boys by the door, smoking. They watch everyone.','Geng Lorong took this place from a family that ran it for thirty years.'],
+};
+const HEAT_LINES = [
+  ['Quiet street tonight. Too quiet, maybe.','No patrol cars all evening. Somebody paid somebody.'],
+  ['A patrol car went past twice tonight. Slowly.','Constables on the corner, pretending not to see the bola runners.'],
+  ['The police are kicking in doors on this street now.','Everybody\'s cash is under the mattress this week. Raids.'],
+  ['Federal men in plain clothes. You can tell by the shoes.','A van with no markings outside the market. Three nights now.'],
+  ['Everyone\'s waiting for the big raid. Shutters down by nine.','They say Bukit Aman has a list. They say the boss from Ipoh is on it.'],
+];
+const PHASE_LINES = {
+  morning:['Sun\'s coming up grey. The night shift goes home, the day shift starts lying.','Dew and diesel. Chow Kit market opening, fishmongers shouting.'],
+  day:['Afternoon rain. The five-foot ways are full of people waiting it out.','Lunch crowd at the hawker stalls. Gangsters eat noodles like everybody else.'],
+  dusk:['The neon flickers on one sign at a time. Like the street waking up.','Maghrib, and the call to prayer over the traffic.'],
+  night:['Satay smoke and wet tarmac. Chow Kit smells like this every night.','Three days of rain. The longkang is overflowing again.','A cat under the five-foot way, watching the rain like it\'s owed money.'],
+};
+const NEWS_LINES = {
+  raid:['They say the police took the cash box from {addr}. And the cashier.','Police at {addr} again. Somebody\'s going to Pudu.'],
+  fire:['Smoke over {addr} last night. Nobody ran with buckets.','{addr} burned. The fire brigade took forty minutes. Funny, that.'],
+  torch:['Geng Lorong lost {addr} to a fire. Mat Botak will want somebody\'s head for it.'],
+  bought:['Somebody bought {addr}. Paid cash, they say. Clean cash.'],
+  rivalbought:['Geng Lorong took over {addr}. Mat Botak\'s spreading.'],
+  expand:['The headman in {where} sold out. The red outfit owns the row now.'],
+  tip:['Police found people locked in a Geng Lorong shophouse. Somebody made a phone call.'],
+  strong:['Mat Botak\'s place at {addr} had its shutters down for two days. Nobody says why.'],
+};
+const SEEN_LINES = ['Is that {other}, the {job}? Haven\'t seen them sober in years.','{other} the {job}, walking fast. Owes somebody money, I\'d bet.','There goes {other}. Knows everybody\'s business on this street.','{other}, the {job}. We used to be friends, before.','Don\'t make eye contact with {other}. Not tonight.'];
+const TURF_LINES = {
+  you:['Half the street pays the red outfit now. Mat Botak must be furious.','The red signs are winning. I\'ve seen gangs come and go; this one feels different.'],
+  even:['Two gangs, one street, and everybody else in the middle.','You can feel it. Something\'s going to break soon.'],
+  rival:['Geng Lorong still owns most of this street. The new boss is a rumour so far.','Mat Botak walks like he owns the road. Mostly he does.'],
+};
+
+function news(kind, lot, extra){ if (!S) return; S.news = S.news || []; S.news.unshift({ t:S.t, kind, lot, extra }); S.news.length = Math.min(S.news.length, 12); }
+function fill(t, P, extra){
+  return t.replace(/\{addr\}/g, extra && extra.lot != null ? lotAddress(extra.lot) : 'the corner').replace(/\{where\}/g, extra && extra.where || 'the next block')
+          .replace(/\{other\}/g, extra && extra.other || 'somebody').replace(/\{job\}/g, extra && extra.job || 'stranger')
+          .replace(/\{kin\}/g, P.kin).replace(/\{debt\}/g, P.ties.debt);
+}
+function streetName(w){
+  const p = w.g.position;
+  if (w.axis === 'x') return Math.abs(p.z) < 5 ? 'Jalan Raja Bot' : p.z < 0 ? 'Jalan Raja Alang' : 'Lorong Haji Taib';
+  return Math.abs(p.x) < 5 ? 'Jalan Haji Taib' : p.x < 0 ? 'Jalan Tuanku Abdul Rahman' : 'Jalan Raja Laut';
+}
+function profileTies(P){
+  const t = [TEMPERS[P.temper].label];
+  if (P.ties.debt) t.push(`Owes the Ah Long RM ${P.ties.debt.toLocaleString('en-US')}`);
+  if (P.ties.side === 'you') t.push('On your payroll'); if (P.ties.side === 'rival') t.push('Works for Geng Lorong');
+  if (P.ties.informant) t.push('Talks to somebody');
+  return t;
+}
+
+// what goes through their head right now
+function composeThought(w, force){
+  const P = w.profile, pos = w.g.position, T = TEMPERS[P.temper];
+  let near = -1, best = 4.6;
+  G.lots.forEach((V,i) => { const d = Math.hypot(V.x - pos.x, V.z - pos.z); if (d < best){ best = d; near = i; } });
+  const pool = [];
+  const add = (wt, text) => { if (text && !w.recent.includes(text)) pool.push([wt, text]); };
+
+  // 1. the place they're passing
+  if (near >= 0 && near !== w.lastPlot){
+    w.lastPlot = near;
+    const l = S.lots[near];
+    if (S.policeLot === near) add(9, `Police lights outside ${lotAddress(near)}. Somebody's going to Pudu tonight.`);
+    else if (S.fires.some(f => f.lot === near)) add(9, 'Flames in the upstairs windows and nobody running with buckets. That tells you whose shop it was.');
+    else if (l.owner === 'locked') add(4, pick(TYPE_LINES.locked));
+    else if (l.biz){
+      const type = l.biz.type, base = pick(TYPE_LINES[type]);
+      if (type === 'ahlong' && P.ties.debt) add(10, `The Ah Long's door. I owe them RM ${P.ties.debt.toLocaleString('en-US')} and the interest grows every Friday. Cross the road. Don't run.`);
+      else if (P.tie === type && P.ties.side === l.owner) add(10, l.owner === 'you' ? 'My shift starts soon. The boss from Ipoh pays on Fridays, cash, no excuses.' : 'Mat Botak still owes me two weeks. I keep turning up. What else would I do?');
+      else add(7, base + ' ' + (l.owner === 'you' ? T.you : l.owner === 'rival' ? T.rival : ''));
+      if (P.temper === 'nosy') add(3, `Who's running ${lotAddress(near)} these days? ${l.owner === 'you' ? 'The red outfit, I heard.' : 'Mat Botak\'s cousin, I heard.'}`);
+    }
+    else if (l.burned) add(7, pick(TYPE_LINES.burned));
+    else if (l.owner === 'sale') add(5, pick(TYPE_LINES.sale));
+    else add(5, pick(TYPE_LINES.empty));
+  }
+  if (pool.length && Math.random() < .75){ const top = pool.sort((x,y) => y[0]-x[0])[0][1]; return top; }
+  if (!force && !pool.length && S.t < w.nextAt) return null;
+
+  // 2. what happened in the city lately
+  (S.news || []).filter(n => S.t - n.t < 36).slice(0,3).forEach(n => {
+    const lines = NEWS_LINES[n.kind]; if (lines) add(4, fill(pick(lines), P, { lot:n.lot, where:n.extra }));
+  });
+  // 3. somebody they recognise
+  const other = G.walkers.find(o => o !== w && o.g.visible !== false && o.g.position.distanceTo(pos) < 3.2);
+  if (other) add(3, fill(pick(SEEN_LINES), P, { other:other.profile.name, job:other.profile.job }));
+  // 4. their own life
+  add(3, pick(P.jobLines));
+  add(2, pick(T.lines));
+  add(2, `All I want is ${P.hope}. Is that so much?`);
+  add(2, `Some nights I lie awake thinking about ${P.fear}.`);
+  add(1.5, fill(P.kinLine, P));
+  if (P.ties.debt) add(2, `RM ${P.ties.debt.toLocaleString('en-US')} to the Ah Long. I could sell the radio. I could sell the bicycle. I could run.`);
+  if (P.ties.side === 'you') add(2, 'I work for the boss from Ipoh now. My mother doesn\'t know. My mother suspects.');
+  if (P.ties.side === 'rival') add(2, 'Mat Botak pays late and shouts early. But he pays.');
+  if (P.ties.informant === 'you') add(2, 'I pass the boss from Ipoh a word now and then. Which raids, which nights.');
+  if (P.ties.informant === 'rival') add(2, 'Mat Botak gives me fifty a week to tell him where the patrols go. It\'s just talking.');
+  if (P.age >= 65) add(1.5, 'When I was young this was a kampung. Now it\'s neon and gangsters and rain.');
+  if (P.age <= 23) add(1.5, 'Everyone my age wants to go to Singapore or join a gang. I want neither. I think.');
+  // 5. the street's mood
+  add(2, pick(HEAT_LINES[heatLevel()]));
+  const sh = shares(), side = sh.you > sh.riv*1.2 ? 'you' : sh.riv > sh.you*1.2 ? 'rival' : 'even';
+  add(1.5, pick(TURF_LINES[side]));
+  add(1.5, pick(PHASE_LINES[phaseOf(Math.floor(S.t % 24))]));
+  if (S.truceUntil > S.t) add(3, 'They say Mat Botak and the new boss sat down at the Lake Gardens. A truce. For now.');
+  if (S.lieLow) add(3, 'The red outfit\'s back rooms are dark tonight. Lying low, everyone says.');
+
+  let tot = pool.reduce((s,[wt]) => s + wt, 0) * Math.random();
+  for (const [wt, text] of pool){ if ((tot -= wt) <= 0) return text; }
+  return pool.length ? pool[0][1] : null;
+}
+
+function applySecret(w){
+  const P = w.profile, s = P.secret; if (P.secretKnown) return;
+  P.secretKnown = true;
+  if (s.fx === 'delay') S.rival.nextMove += 24;
+  if (s.fx === 'heat') S.heat = clamp(S.heat - 6, 0, 100);
+  if (s.fx === 'cash') S.dirty += 400;
+  if (s.fx === 'cash2') S.dirty += 250;
+  if (s.fx === 'muscle'){ if (S.muscle < 6) S.muscle++; S.rival.muscle = Math.max(1, S.rival.muscle - 1); }
+  if (s.fx === 'respect') S.respect = clamp(S.respect + 3, 0, 100);
+  if (s.fx === 'discount') S.discount = .8;
+  log(`${P.name} let something slip. ${s.fx ? s.note : 'Nothing you can use, but now you know.'}`, s.fx ? 'good' : '');
+  $('povSecret').hidden = false; $('povSecret').textContent = s.fx ? 'Secret learned · ' + s.note : 'Secret learned';
+  updateHUD();
+}
+
+function enterPOV(w){
+  if (!G.ok || !S) return;
+  if (G.pov) G.pov.w.g.visible = true;
+  const first = !G.pov;
+  G.pov = { w, look:0, pitch:0, yaw: w.g.rotation.y, text:'', typed:0, dragging:false };
+  w.g.visible = false; w.lastPlot = -1; w.nextAt = 0; w.followed = w.followed || 0;
+  selected = -1; renderFile(); $('tag').hidden = true;
+  if (first){ G.fogSave = [G.scene.fog.near, G.scene.fog.far]; G.scene.fog.near = 5; G.scene.fog.far = 46; }
+  for (let k=0;k<G.rain.N;k++) resetDrop(k, true);
+  document.body.classList.add('pov'); $('pov').hidden = false;
+  const P = w.profile;
+  $('povName').textContent = P.name;
+  $('povRole').textContent = `${P.age}, ${P.job}`;
+  $('povTies').innerHTML = profileTies(P).map(t => `<i>${t}</i>`).join('');
+  $('povSecret').hidden = !P.secretKnown; $('povSecret').textContent = P.secretKnown ? 'Secret learned' : '';
+  $('flash').style.background = '#000'; $('flash').style.transition = 'none'; $('flash').style.opacity = 1;
+  requestAnimationFrame(() => { $('flash').style.transition = 'opacity .7s'; $('flash').style.opacity = 0; });
+  sfx.click(); say(composeThought(w, true));
+}
+function exitPOV(){
+  if (!G.pov) return;
+  G.pov.w.g.visible = true;
+  const p = G.pov.w.g.position; G.target.set(clamp(p.x,-30,30), 0, clamp(p.z,-30,30)); updateCamera();
+  voStop(); try{ speechSynthesis.cancel(); }catch(e){}
+  G.pov = null; G.scene.fog.near = G.fogSave[0]; G.scene.fog.far = G.fogSave[1];
+  for (let k=0;k<G.rain.N;k++) resetDrop(k, true);
+  document.body.classList.remove('pov'); $('pov').hidden = true;
+  $('flash').style.background = '#fff'; $('flash').style.opacity = 0;
+}
+function nextBystander(){ if (!G.pov) return; const i = (G.pov.w.idx + 1) % G.walkers.length; enterPOV(G.walkers[i]); }
+function say(text){
+  const P = G.pov; if (!P || !text || text === P.text) return;
+  const w = P.w; P.text = text; P.typed = 0; w.nextAt = S.t + 3.2; w.thoughts++;
+  w.recent.unshift(text); w.recent.length = Math.min(w.recent.length, 10);
+  voiceBystander(w, text);
+}
+function povTick(time, dt){
+  const P = G.pov; if (!P) return;
+  const w = P.w, pos = w.g.position, r = w.rig;
+  P.yaw += angDiff(P.yaw, w.g.rotation.y) * Math.min(1, dt*3);
+  if (!P.dragging){ P.look *= 1 - Math.min(1, dt*.6); P.pitch *= 1 - Math.min(1, dt*.8); }
+  const a = P.yaw + P.look + r.head.rotation.y*.8, bob = r.body.position.y*.6;
+  const fx = Math.sin(a), fz = Math.cos(a), eye = r.eye*.98;
+  G.persp.position.set(pos.x + Math.sin(P.yaw)*.1, pos.y + eye + bob, pos.z + Math.cos(P.yaw)*.1);
+  G.persp.lookAt(G.persp.position.x + fx, G.persp.position.y - .05 + Math.sin(P.pitch + w.profile.hunch*.5), G.persp.position.z + fz);
+  G.persp.rotateZ(Math.sin(w.bob)*.005);
+  w.followed += dt;
+  if (!w.profile.secretKnown && w.followed > 22 && w.thoughts >= 4 && P.typed >= P.text.length){
+    P.text = w.profile.secret.text; P.typed = 0; w.nextAt = S.t + 5; applySecret(w); voiceBystander(w, P.text);
+  } else if (P.typed >= P.text.length) say(composeThought(w, false));
+  const before = Math.floor(P.typed); P.typed = Math.min(P.text.length, P.typed + dt*30);
+  if (Math.floor(P.typed) !== before) $('povText').textContent = P.text.slice(0, Math.floor(P.typed));
+  const hh = Math.floor(S.t % 24), mm = Math.floor((S.t % 1)*6)*10;
+  $('povWhere').textContent = `${streetName(w)} · ${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}`;
+}
+function renderFrame(){
+  const R = G.renderer;
+  R.setRenderTarget(G.rtScene); R.render(G.scene, G.pov ? G.persp : G.camera);
+  const w = G.rtA.width, h = G.rtA.height;
+  G.mBright.uniforms.t.value = G.rtScene.texture; pass(G.mBright, G.rtA);
+  for (let k=1;k<=2;k++){
+    G.mBlur.uniforms.t.value = G.rtA.texture; G.mBlur.uniforms.dir.value.set(k*1.6/w, 0); pass(G.mBlur, G.rtB);
+    G.mBlur.uniforms.t.value = G.rtB.texture; G.mBlur.uniforms.dir.value.set(0, k*1.6/h); pass(G.mBlur, G.rtA);
+  }
+  const viewCam = G.pov ? G.persp : G.camera;
+  G.mComp.uniforms.invVP.value.multiplyMatrices(viewCam.matrixWorld, viewCam.projectionMatrixInverse);
+  G.mComp.uniforms.fogOn.value = G.pov ? 0 : 1;
+  G.mComp.uniforms.tS.value = G.rtScene.texture; G.mComp.uniforms.tB.value = G.rtA.texture; pass(G.mComp, null);
+}
+
+/* =========================================================================
+   CUTSCENES — motion comics on a 2D canvas
+   ========================================================================= */
+const CS = { active:false, queue:[], panels:null, i:0, t:0, typed:0, done:null, wasSpeed:1 };
+const grainCanvas = (() => { const c = document.createElement('canvas'); c.width = c.height = 256; const g = c.getContext('2d'); const d = g.createImageData(256,256); for (let k=0;k<d.data.length;k+=4){ const v = Math.random()*255; d.data[k]=d.data[k+1]=d.data[k+2]=v; d.data[k+3]=255; } g.putImageData(d,0,0); return c; })();
+const NOIR = { ink:'#050506', deep:'#0c0d0f', mid:'#24262a', grey:'#6d7077', pale:'#d8d4c8', red:'#ff2238', teal:'#3cc4d0', amber:'#ffb03a' };
+
+function seeded(n){ return mulberry(n); }
+function rainLayer(g, w, h, t, count, alpha){
+  g.save(); g.strokeStyle = `rgba(210,215,225,${alpha})`; g.lineWidth = Math.max(1, w/1400);
+  const r = seeded(7);
+  for (let k=0;k<count;k++){
+    const x0 = r()*w*1.2, sp = .6 + r()*.6, len = h*(.04 + r()*.05);
+    const y = ((r()*h + t*h*1.6*sp) % (h*1.1)) - h*.05, x = (x0 - (y/h)*w*.08) % (w*1.2);
+    g.beginPath(); g.moveTo(x, y); g.lineTo(x - len*.18, y + len); g.stroke();
+  }
+  g.restore();
+}
+function vignetteLayer(g, w, h, strength=.85){
+  const gr = g.createRadialGradient(w/2,h/2,Math.min(w,h)*.25,w/2,h/2,Math.max(w,h)*.75);
+  gr.addColorStop(0,'rgba(0,0,0,0)'); gr.addColorStop(1,`rgba(0,0,0,${strength})`); g.fillStyle = gr; g.fillRect(0,0,w,h);
+}
+function glowText(g, text, x, y, size, color, blur, font){
+  g.save(); g.font = font || `600 ${size}px "Bodoni Moda", Georgia, serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.shadowColor = color; g.shadowBlur = blur; g.fillStyle = color; g.fillText(text, x, y); g.shadowBlur = blur*.4; g.fillStyle = '#fff'; g.globalAlpha = .55; g.fillText(text, x, y); g.restore();
+}
+function fedoraMan(g, x, y, s, fill, rim){
+  // standing figure in coat and fedora, feet at (x,y), height ≈ 3.2s
+  g.save(); g.translate(x,y); g.fillStyle = fill;
+  g.beginPath(); g.moveTo(-.55*s,0); g.lineTo(-.62*s,-1.6*s); g.lineTo(-.5*s,-2.35*s); g.quadraticCurveTo(0,-2.62*s,.5*s,-2.35*s); g.lineTo(.62*s,-1.6*s); g.lineTo(.55*s,0); g.closePath(); g.fill();
+  g.beginPath(); g.ellipse(0,-2.62*s,.24*s,.3*s,0,0,Math.PI*2); g.fill();
+  g.beginPath(); g.ellipse(0,-2.82*s,.5*s,.09*s,0,0,Math.PI*2); g.fill();
+  g.beginPath(); g.moveTo(-.28*s,-2.84*s); g.quadraticCurveTo(-.26*s,-3.2*s,0,-3.18*s); g.quadraticCurveTo(.26*s,-3.2*s,.28*s,-2.84*s); g.fill();
+  if (rim){ g.strokeStyle = rim; g.lineWidth = Math.max(1,s*.04); g.beginPath(); g.moveTo(.62*s,-1.6*s); g.lineTo(.5*s,-2.35*s); g.stroke(); g.beginPath(); g.ellipse(0,-2.82*s,.5*s,.09*s,0,-.6,.6); g.stroke(); }
+  g.restore();
+}
+function skyline(g, w, h, base, seed, maxH, lit){
+  const r = seeded(seed); let x = -20;
+  while (x < w + 20){
+    const bw = w*(.03 + r()*.06), bh = h*maxH*(.3 + r()*.7);
+    g.fillStyle = NOIR.ink; g.fillRect(x, base - bh, bw, bh);
+    if (lit) for (let wy = base - bh + 8; wy < base - 8; wy += h*.022) for (let wx = x + 4; wx < x + bw - 6; wx += w*.012) if (r() < lit){ g.fillStyle = `rgba(220,214,196,${.15 + r()*.35})`; g.fillRect(wx, wy, w*.005, h*.01); }
+    x += bw + w*.004;
+  }
+}
+const ART = {
+  // 1. city in rain, Sultan Abdul Samad clock tower
+  city(g,w,h,t){
+    const sky = g.createLinearGradient(0,0,0,h*.75); sky.addColorStop(0,'#08090b'); sky.addColorStop(1,'#1d2026'); g.fillStyle = sky; g.fillRect(0,0,w,h);
+    const bolt = (Math.sin(t*1.3) > .985 || (t > 2.2 && t < 2.35)) ? 1 : 0;
+    if (bolt){ g.fillStyle = 'rgba(200,210,230,.35)'; g.fillRect(0,0,w,h); }
+    g.fillStyle = 'rgba(40,43,50,.6)'; for (let k=0;k<5;k++){ g.beginPath(); g.ellipse((k*.27*w + t*w*.01) % (w*1.3) - w*.1, h*(.1+.05*k), w*.25, h*.05, 0, 0, Math.PI*2); g.fill(); }
+    skyline(g,w,h,h*.72,3,.42,.18);
+    // clock tower
+    const tx = w*.6, tw = w*.045, base = h*.72, top = h*.3;
+    g.fillStyle = '#040405'; g.fillRect(tx - tw/2, top, tw, base-top);
+    g.beginPath(); g.moveTo(tx - tw*.7, top); g.bezierCurveTo(tx - tw*.9, top - h*.06, tx - tw*.1, top - h*.07, tx, top - h*.12); g.bezierCurveTo(tx + tw*.1, top - h*.07, tx + tw*.9, top - h*.06, tx + tw*.7, top); g.fill();
+    g.fillRect(tx - 1.5, top - h*.17, 3, h*.06);
+    g.fillRect(tx - w*.22, h*.55, w*.44, base - h*.55);
+    [-.2,-.1,.1,.2].forEach(o => { const cx = tx + w*o; g.beginPath(); g.ellipse(cx, h*.55, w*.018, h*.03, 0, Math.PI, 0); g.fill(); g.fillRect(cx - w*.012, h*.55, w*.024, h*.03); });
+    g.fillStyle = 'rgba(220,214,196,.85)'; g.beginPath(); g.arc(tx, top + h*.06, tw*.3, 0, Math.PI*2); g.fill();
+    g.strokeStyle = '#111'; g.lineWidth = 2; g.beginPath(); g.moveTo(tx, top+h*.06); g.lineTo(tx, top+h*.06-tw*.22); g.moveTo(tx, top+h*.06); g.lineTo(tx+tw*.16, top+h*.06+tw*.05); g.stroke();
+    // wet street + reflections
+    const st = g.createLinearGradient(0,h*.72,0,h); st.addColorStop(0,'#14161a'); st.addColorStop(1,'#030304'); g.fillStyle = st; g.fillRect(0,h*.72,w,h*.28);
+    g.save(); g.globalAlpha = .18; g.translate(0, h*1.44); g.scale(1,-1); skyline(g,w,h,h*.72,3,.42,.18); g.restore();
+    g.fillStyle = 'rgba(220,214,196,.25)'; g.fillRect(tx - 2, h*.74, 4, h*.2);
+    rainLayer(g,w,h,t,260,.28);
+  },
+  // 2. Puduraya at night, man under a lamp
+  station(g,w,h,t){
+    g.fillStyle = '#0b0c0e'; g.fillRect(0,0,w,h);
+    g.fillStyle = '#121418'; g.fillRect(0,h*.12,w,h*.5);
+    glowText(g, 'PUDURAYA', w*.5, h*.2, h*.07, 'rgba(225,232,226,.85)', 18, `700 ${h*.07}px Georgia, serif`);
+    // bus
+    g.fillStyle = '#070809'; g.beginPath(); g.roundRect ? g.roundRect(w*.02,h*.36,w*.42,h*.3,8) : g.rect(w*.02,h*.36,w*.42,h*.3); g.fill();
+    for (let k=0;k<6;k++){ g.fillStyle = `rgba(214,206,180,${.12 + (k%3)*.08})`; g.fillRect(w*(.04 + k*.065), h*.4, w*.05, h*.08); }
+    // lamp
+    const lx = w*.62; g.fillStyle = '#050506'; g.fillRect(lx, h*.12, w*.006, h*.62); g.fillRect(lx - w*.05, h*.12, w*.055, h*.012);
+    const cone = g.createLinearGradient(0,h*.13,0,h*.78); cone.addColorStop(0,'rgba(230,232,240,.28)'); cone.addColorStop(1,'rgba(230,232,240,0)');
+    g.fillStyle = cone; g.beginPath(); g.moveTo(lx - w*.045, h*.135); g.lineTo(lx - w*.17, h*.8); g.lineTo(lx + w*.08, h*.8); g.lineTo(lx - w*.035, h*.135); g.fill();
+    // ground
+    const gr = g.createLinearGradient(0,h*.72,0,h); gr.addColorStop(0,'#16181c'); gr.addColorStop(1,'#020203'); g.fillStyle = gr; g.fillRect(0,h*.72,w,h*.28);
+    const s = h*.13, fx = w*.6 + Math.sin(t*.3)*2, fy = h*.76;
+    fedoraMan(g, fx, fy, s, '#020203', 'rgba(220,220,214,.5)');
+    g.fillStyle = '#020203'; g.fillRect(fx + s*.6, fy - s*.75, s*.75, s*.55); g.fillRect(fx + s*.9, fy - s*.85, s*.15, s*.1);
+    g.save(); g.globalAlpha = .22; g.translate(0, fy*2); g.scale(1,-1); fedoraMan(g, fx, fy, s, '#0e0f12'); g.restore();
+    g.strokeStyle = 'rgba(210,214,222,.18)'; for (let k=0;k<5;k++){ g.beginPath(); g.ellipse(fx + (k-2)*w*.06, fy + h*.06 + k*4, w*.03 + ((t*20+k*13)%30), h*.006, 0, 0, Math.PI*2); g.stroke(); }
+    rainLayer(g,w,h,t,200,.25);
+  },
+  // 3. the loan shark's ledger
+  ledger(g,w,h,t){
+    g.fillStyle = '#070708'; g.fillRect(0,0,w,h);
+    const lamp = g.createRadialGradient(w*.3,h*.2,10,w*.4,h*.5,w*.6); lamp.addColorStop(0,'rgba(220,214,196,.32)'); lamp.addColorStop(1,'rgba(0,0,0,0)'); g.fillStyle = lamp; g.fillRect(0,0,w,h);
+    // window with amber neon outside
+    g.fillStyle = '#0e0f11'; g.fillRect(w*.7,h*.08,w*.26,h*.42);
+    glowText(g, 'PINJAMAN WANG', w*.83, h*.29, h*.035, NOIR.amber, 22, `700 ${h*.035}px Georgia, serif`);
+    g.strokeStyle = '#000'; g.lineWidth = w*.006; g.strokeRect(w*.7,h*.08,w*.26,h*.42); g.beginPath(); g.moveTo(w*.83,h*.08); g.lineTo(w*.83,h*.5); g.stroke();
+    // ledger book
+    g.save(); g.translate(w*.42, h*.5); g.rotate(-.06);
+    const pw = w*.24, ph = h*.36;
+    g.fillStyle = '#c9c3b4'; g.beginPath(); g.moveTo(-pw,-ph/2); g.lineTo(0,-ph/2+8); g.lineTo(0,ph/2); g.lineTo(-pw,ph/2-6); g.fill();
+    g.fillStyle = '#d6d0c2'; g.beginPath(); g.moveTo(0,-ph/2+8); g.lineTo(pw,-ph/2); g.lineTo(pw,ph/2-6); g.lineTo(0,ph/2); g.fill();
+    g.strokeStyle = 'rgba(60,70,90,.35)'; g.lineWidth = 1;
+    for (let y=-ph/2+24; y<ph/2-10; y+=ph/14){ g.beginPath(); g.moveTo(-pw+12,y); g.lineTo(-10,y+4); g.moveTo(10,y+4); g.lineTo(pw-12,y); g.stroke(); }
+    g.fillStyle = '#18140f'; g.font = `${ph*.065}px "Special Elite", monospace`;
+    ['Tan Ah Kow','Sinnathamby','Rahim B.','Lee & Sons'].forEach((n,k) => g.fillText(n, -pw+18, -ph/2+ph*.17 + k*ph/7));
+    g.fillStyle = '#b3121f'; g.font = `italic 700 ${ph*.12}px "Bodoni Moda", Georgia, serif`; g.fillText('RM 40,000', 22, -ph*.05);
+    g.font = `700 ${ph*.2}px "Noto Serif CJK SC", serif`; g.fillText('欠', pw*.55, ph*.25);
+    g.restore();
+    // hand + cigarette smoke
+    g.fillStyle = '#030303'; g.beginPath(); g.ellipse(w*.66,h*.78,w*.09,h*.05,-.3,0,Math.PI*2); g.fill(); g.fillRect(w*.7,h*.76,w*.3,h*.07);
+    g.fillStyle = '#e8e2d4'; g.fillRect(w*.565,h*.76,w*.05,h*.008); g.fillStyle = NOIR.amber; g.shadowColor = NOIR.amber; g.shadowBlur = 12; g.fillRect(w*.56,h*.759,w*.006,h*.01); g.shadowBlur = 0;
+    g.strokeStyle = 'rgba(220,220,220,.16)'; g.lineWidth = 3;
+    for (let k=0;k<3;k++){ g.beginPath(); for (let y=0;y<h*.6;y+=6){ const x = w*.56 + Math.sin(y*.02 + t*1.2 + k)*20*(y/h+.2) + k*6; y===0 ? g.moveTo(x, h*.75 - y) : g.lineTo(x, h*.75 - y); } g.stroke(); }
+  },
+  // 4. the back lane and the den's red sign
+  lane(g,w,h,t){
+    g.fillStyle = '#060607'; g.fillRect(0,0,w,h);
+    const vx = w*.52, vy = h*.42;
+    const end = g.createRadialGradient(vx,vy,4,vx,vy,w*.18); end.addColorStop(0,'rgba(190,196,210,.35)'); end.addColorStop(1,'rgba(0,0,0,0)'); g.fillStyle = end; g.fillRect(0,0,w,h);
+    g.fillStyle = '#0d0e10'; g.beginPath(); g.moveTo(0,0); g.lineTo(vx - w*.05, vy - h*.12); g.lineTo(vx - w*.05, vy + h*.1); g.lineTo(0,h); g.fill();
+    g.fillStyle = '#111215'; g.beginPath(); g.moveTo(w,0); g.lineTo(vx + w*.05, vy - h*.12); g.lineTo(vx + w*.05, vy + h*.1); g.lineTo(w,h); g.fill();
+    g.fillStyle = '#16181b'; g.beginPath(); g.moveTo(0,h); g.lineTo(vx - w*.05, vy + h*.1); g.lineTo(vx + w*.05, vy + h*.1); g.lineTo(w,h); g.fill();
+    g.strokeStyle = '#020202'; g.lineWidth = 2; for (let k=0;k<5;k++){ g.beginPath(); g.moveTo(0, h*(.05+k*.04)); g.quadraticCurveTo(w*.5, h*(.2+k*.05), w, h*(.02+k*.05)); g.stroke(); }
+    [[.08,.3],[.15,.55],[.88,.25],[.8,.6]].forEach(([x,y]) => { g.fillStyle = '#08090a'; g.fillRect(w*x - w*.04, h*y, w*.08, h*.07); });
+    // door slit
+    g.fillStyle = 'rgba(200,190,160,.5)'; g.beginPath(); g.moveTo(w*.22,h*.5); g.lineTo(w*.235,h*.5); g.lineTo(w*.235,h*.74); g.lineTo(w*.22,h*.76); g.fill();
+    // red neon vertical sign
+    const on = (Math.sin(t*9) > -.85 || t < .4) ? 1 : .25;
+    g.save(); g.globalAlpha = on;
+    g.fillStyle = '#100204'; g.fillRect(w*.7, h*.18, w*.07, h*.36);
+    g.font = `700 ${h*.11}px "Noto Serif CJK SC","Songti SC",serif`;
+    glowText(g, '麻', w*.735, h*.27, h*.11, NOIR.red, 30, g.font); glowText(g, '將', w*.735, h*.44, h*.11, NOIR.red, 30, g.font);
+    const pool = g.createRadialGradient(w*.73,h*.85,4,w*.73,h*.85,w*.2); pool.addColorStop(0,'rgba(255,34,56,.4)'); pool.addColorStop(1,'rgba(255,34,56,0)');
+    g.fillStyle = pool; g.fillRect(w*.5,h*.7,w*.5,h*.3);
+    g.globalAlpha = on*.35; g.fillStyle = NOIR.red; for (let k=0;k<14;k++) g.fillRect(w*.7 + Math.random()*w*.07, h*.72 + k*h*.018, w*.004 + Math.random()*w*.01, h*.008);
+    g.restore();
+    g.fillStyle = 'rgba(200,200,200,.07)'; for (let k=0;k<4;k++){ g.beginPath(); g.ellipse(w*.4 + k*w*.04, h*.8 - ((t*30 + k*40) % (h*.4)), w*.05, h*.03, 0, 0, Math.PI*2); g.fill(); }
+    rainLayer(g,w,h,t,140,.22);
+  },
+  // 5. Geng Lorong at the end of the lane
+  gang(g,w,h,t){
+    g.fillStyle = '#050506'; g.fillRect(0,0,w,h);
+    const back = g.createRadialGradient(w*.5,h*.45,10,w*.5,h*.45,w*.45); back.addColorStop(0,'rgba(60,196,208,.5)'); back.addColorStop(.5,'rgba(60,196,208,.12)'); back.addColorStop(1,'rgba(0,0,0,0)');
+    g.fillStyle = back; g.fillRect(0,0,w,h);
+    g.fillStyle = '#060708'; g.fillRect(0,0,w*.22,h); g.fillRect(w*.78,0,w*.22,h);
+    const gy = h*.8, ss = [h*.075,h*.09,h*.12,h*.09,h*.075], xs = [.3,.4,.5,.6,.7];
+    xs.forEach((x,k) => {
+      const s = ss[k], fx = w*x;
+      g.fillStyle = '#010101';
+      g.save(); g.globalAlpha = .55; g.beginPath(); g.moveTo(fx - s*.4, gy); g.lineTo(fx - s*.9, h); g.lineTo(fx + s*.9, h); g.lineTo(fx + s*.4, gy); g.fill(); g.restore();
+      g.beginPath(); g.moveTo(fx - .55*s, gy); g.lineTo(fx - .7*s, gy - 1.7*s); g.quadraticCurveTo(fx, gy - 2.5*s, fx + .7*s, gy - 1.7*s); g.lineTo(fx + .55*s, gy); g.fill();
+      g.beginPath(); g.arc(fx, gy - 2.45*s, .3*s, 0, Math.PI*2); g.fill();
+      if (k !== 2){ g.beginPath(); g.ellipse(fx, gy - 2.65*s, .32*s, .12*s, 0, Math.PI, 0); g.fill(); }
+      g.strokeStyle = 'rgba(60,196,208,.55)'; g.lineWidth = 1.5; g.beginPath(); g.arc(fx, gy - 2.45*s, .3*s, -1.2, .2); g.stroke();
+      if (k % 2 === 0){ const ember = .6 + .4*Math.sin(t*2 + k*2); g.fillStyle = `rgba(255,150,60,${ember})`; g.shadowColor = NOIR.amber; g.shadowBlur = 14; g.beginPath(); g.arc(fx + .22*s, gy - 2.35*s, s*.035, 0, Math.PI*2); g.fill(); g.shadowBlur = 0; }
+    });
+    rainLayer(g,w,h,t,170,.2);
+  },
+  // 6. close-up under venetian blinds, title
+  face(g,w,h,t){
+    g.fillStyle = '#060607'; g.fillRect(0,0,w,h);
+    g.save();
+    for (let k=0;k<9;k++){ const y = h*.12 + k*h*.085 + Math.sin(t*.4)*2; g.fillStyle = 'rgba(214,210,198,.13)'; g.beginPath(); g.moveTo(0,y); g.lineTo(w,y - h*.08); g.lineTo(w,y - h*.08 + h*.04); g.lineTo(0,y + h*.04); g.fill(); }
+    // head & hat silhouette (profile, facing left)
+    const cx = w*.56, cy = h*.55, s = h*.34;
+    g.fillStyle = '#020202';
+    g.beginPath(); g.moveTo(cx + s*.6, h); g.lineTo(cx + s*.55, cy + s*.55); g.quadraticCurveTo(cx + s*.5, cy - s*.1, cx + s*.2, cy - s*.35);
+    g.lineTo(cx - s*.32, cy - s*.3); g.quadraticCurveTo(cx - s*.42, cy - s*.05, cx - s*.36, cy + s*.08); g.lineTo(cx - s*.48, cy + s*.22); g.lineTo(cx - s*.36, cy + s*.27);
+    g.quadraticCurveTo(cx - s*.36, cy + s*.45, cx - s*.2, cy + s*.52); g.lineTo(cx - s*.1, cy + s*.62); g.lineTo(cx - s*.2, h); g.closePath(); g.fill();
+    g.beginPath(); g.ellipse(cx + s*.05, cy - s*.36, s*.62, s*.09, -.05, 0, Math.PI*2); g.fill();
+    g.beginPath(); g.moveTo(cx - s*.3, cy - s*.38); g.quadraticCurveTo(cx - s*.28, cy - s*.85, cx + s*.05, cy - s*.82); g.quadraticCurveTo(cx + s*.38, cy - s*.85, cx + s*.38, cy - s*.38); g.fill();
+    // band of light across the eye
+    g.beginPath(); g.rect(0, cy - s*.2, w, s*.11); g.clip();
+    const band = g.createLinearGradient(cx - s*.45, 0, cx + s*.1, 0); band.addColorStop(0,'rgba(214,210,198,.5)'); band.addColorStop(1,'rgba(214,210,198,0)');
+    g.fillStyle = band; g.fillRect(cx - s*.45, cy - s*.17, s*.55, s*.07);
+    g.fillStyle = '#fff'; g.beginPath(); g.arc(cx - s*.22, cy - s*.12, s*.012, 0, Math.PI*2); g.fill();
+    g.restore();
+    g.strokeStyle = 'rgba(255,34,56,.75)'; g.lineWidth = 2; g.shadowColor = NOIR.red; g.shadowBlur = 12; g.beginPath(); g.ellipse(cx + s*.05, cy - s*.36, s*.62, s*.09, -.05, Math.PI*.05, Math.PI*.55); g.stroke(); g.shadowBlur = 0;
+    if (t > 2.2){
+      const a = clamp((t-2.2)/1.2, 0, 1) * ((Math.sin(t*11) > -.9) ? 1 : .3);
+      g.globalAlpha = a; glowText(g, 'KOTA HITAM', w*.3, h*.2, Math.min(w*.08, h*.13), NOIR.red, 34, `italic 900 ${Math.min(w*.08, h*.13)}px "Bodoni Moda", Georgia, serif`); g.globalAlpha = 1;
+    }
+    rainLayer(g,w,h,t,90,.12);
+  },
+  // vignettes ---------------------------------------------------------
+  open(g,w,h,t,arg){
+    const type = arg != null && S.lots[arg].biz ? S.lots[arg].biz.type : 'den', def = BIZ[type];
+    const c = '#' + def.color.toString(16).padStart(6,'0');
+    g.fillStyle = '#060607'; g.fillRect(0,0,w,h);
+    g.fillStyle = '#0f1013'; g.fillRect(w*.2,0,w*.6,h);
+    const on = t < .8 ? (Math.random() > .5 ? 1 : .1) : 1;
+    g.globalAlpha = on; g.fillStyle = '#080203'; g.fillRect(w*.38,h*.12,w*.24,h*.22);
+    const fs = Math.min(w*.07,h*.13);
+    glowText(g, def.horiz.split(' · ')[0], w*.5, h*.23, fs, c, 40, `700 ${fs}px "Noto Serif CJK SC",Georgia,serif`);
+    const pool = g.createRadialGradient(w*.5,h*.9,4,w*.5,h*.9,w*.35); pool.addColorStop(0, c + '66'); pool.addColorStop(1, c + '00'); g.fillStyle = pool; g.fillRect(0,h*.6,w,h*.4);
+    g.globalAlpha = 1;
+    fedoraMan(g, w*.5, h*.86, h*.13, '#010101', c);
+    rainLayer(g,w,h,t,160,.22);
+  },
+  raid(g,w,h,t){
+    const blink = Math.floor(t*3.4) % 2;
+    g.fillStyle = '#050506'; g.fillRect(0,0,w,h);
+    const c = blink ? 'rgba(255,20,40,' : 'rgba(30,70,255,';
+    const gr = g.createRadialGradient(blink ? w*.3 : w*.7, h*.55, 10, w*.5, h*.55, w*.7); gr.addColorStop(0, c + '.55)'); gr.addColorStop(1, c + '0)'); g.fillStyle = gr; g.fillRect(0,0,w,h);
+    skyline(g,w,h,h*.62,11,.5,.05);
+    g.fillStyle = '#020203'; g.fillRect(0,h*.62,w,h*.38);
+    [.35,.45,.6].forEach((x,k) => fedoraMan(g, w*x, h*.86, h*(.11 + k*.01), '#010101', c + '.6)'));
+    g.fillStyle = c + '.25)'; for (let k=0;k<20;k++) g.fillRect(Math.random()*w, h*.66 + Math.random()*h*.3, w*.06, 2);
+    rainLayer(g,w,h,t,200,.25);
+  },
+  fire(g,w,h,t){
+    g.fillStyle = '#050506'; g.fillRect(0,0,w,h);
+    const glow = g.createRadialGradient(w*.5,h*.6,10,w*.5,h*.6,w*.55); glow.addColorStop(0,'rgba(255,110,20,.6)'); glow.addColorStop(1,'rgba(255,60,0,0)'); g.fillStyle = glow; g.fillRect(0,0,w,h);
+    g.fillStyle = '#030303'; g.fillRect(w*.32,h*.25,w*.36,h*.5); for (let k=0;k<3;k++) g.fillRect(w*(.36+k*.1),h*.2,w*.04,h*.06);
+    for (let k=0;k<70;k++){ const r = seeded(k)(); const x = w*(.32 + r*.36), life = ((t*1.2 + r*3) % 1), y = h*.75 - life*h*.6;
+      g.fillStyle = `rgba(255,${140 - life*100|0},20,${(1-life)*.8})`; g.beginPath(); g.ellipse(x + Math.sin(t*4+k)*10, y, w*.012*(1-life)+2, h*.03*(1-life)+2, 0, 0, Math.PI*2); g.fill(); }
+    g.fillStyle = 'rgba(30,30,30,.5)'; for (let k=0;k<6;k++){ g.beginPath(); g.ellipse(w*.45 + k*w*.03 - t*w*.02, h*.2 - k*h*.03, w*.1, h*.06, 0, 0, Math.PI*2); g.fill(); }
+    rainLayer(g,w,h,t,120,.18);
+  },
+  take(g,w,h,t,arg){ ART.open(g,w,h,t,arg); },
+  // act complete
+  roof(g,w,h,t){
+    const sky = g.createLinearGradient(0,0,0,h); sky.addColorStop(0,'#07080a'); sky.addColorStop(1,'#1a1012'); g.fillStyle = sky; g.fillRect(0,0,w,h);
+    skyline(g,w,h,h*.8,21,.5,.2);
+    for (let k=0;k<7;k++){ const x = w*(.1 + k*.12), y = h*(.62 + (k%3)*.05); const gl = g.createRadialGradient(x,y,2,x,y,w*.05); gl.addColorStop(0,'rgba(255,34,56,.8)'); gl.addColorStop(1,'rgba(255,34,56,0)'); g.fillStyle = gl; g.fillRect(x-w*.06,y-w*.06,w*.12,w*.12); }
+    g.fillStyle = '#010101'; g.fillRect(0,h*.84,w,h*.16);
+    fedoraMan(g, w*.72, h*.86, h*.16, '#000', 'rgba(255,34,56,.7)');
+    g.fillStyle = 'rgba(255,170,90,.9)'; g.beginPath(); g.arc(w*.72 - h*.03, h*.86 - h*.37, 2.5, 0, Math.PI*2); g.fill();
+    if (t > 1.5){ g.globalAlpha = clamp((t-1.5)/1.5,0,1); glowText(g, 'END OF ACT I', w*.35, h*.2, Math.min(w*.05,h*.09), NOIR.red, 26, `italic 800 ${Math.min(w*.05,h*.09)}px "Bodoni Moda",Georgia,serif`); g.globalAlpha = 1; }
+    rainLayer(g,w,h,t,120,.18);
+  },
+  cell(g,w,h,t){
+    g.fillStyle = '#060607'; g.fillRect(0,0,w,h);
+    const win = g.createRadialGradient(w*.7,h*.15,4,w*.6,h*.4,w*.6); win.addColorStop(0,'rgba(220,214,196,.35)'); win.addColorStop(1,'rgba(0,0,0,0)'); g.fillStyle = win; g.fillRect(0,0,w,h);
+    g.fillStyle = '#020202'; g.beginPath(); g.ellipse(w*.45,h*.72,w*.12,h*.2,0,0,Math.PI*2); g.fill(); g.beginPath(); g.arc(w*.45,h*.44,h*.08,0,Math.PI*2); g.fill();
+    g.fillStyle = 'rgba(0,0,0,.92)'; for (let k=0;k<9;k++) g.fillRect(w*(.06 + k*.11), 0, w*.03, h);
+    g.fillStyle = 'rgba(0,0,0,.92)'; g.fillRect(0,h*.2,w,h*.03);
+    if (t > 1.6){ g.globalAlpha = clamp((t-1.6)/1.5,0,1); glowText(g, 'THE END', w*.5, h*.86, Math.min(w*.06,h*.1), NOIR.pale, 20, `italic 800 ${Math.min(w*.06,h*.1)}px "Bodoni Moda",Georgia,serif`); g.globalAlpha = 1; }
+  },
+};
+
+const PROLOGUE = [
+  { art:'city',    dur:7, text:'Kuala Lumpur, 1987. It had rained for three days. The city didn\'t care. The city never does.' },
+  { art:'station', dur:7, text:'I came in on the night bus from Ipoh with one suitcase, my father\'s name, and his debts.' },
+  { art:'ledger',  dur:7, text:'Old Man Wong kept the debts in a red book. Forty thousand ringgit, due by Chinese New Year.' },
+  { art:'lane',    dur:7, text:'Instead of my kneecaps, he gave me a back-room mahjong den in Chow Kit. Nobody else wanted it.' },
+  { art:'gang',    dur:7, text:'Nobody except Geng Lorong. Mat Botak ran these lanes, and he didn\'t like new faces.' },
+  { art:'face',    dur:7, text:'Fine. I didn\'t come here to be liked. I came here to own the street.' },
+];
+const ACT_END = [
+  { art:'roof', dur:8, text:'Ten doors in Chow Kit, and every one of them paid me. Mat Botak learned to drink somewhere else.' },
+  { art:'roof', dur:7, text:'But a city this size is never satisfied. Up the road, the lights of Bukit Bintang were already calling my name.' },
+];
+const FALL = [
+  { art:'raid', dur:6, text:'They came at dawn, the way they always do. Forty men, a magistrate\'s warrant, and a photographer from the papers.' },
+  { art:'cell', dur:7, text:'Pudu Prison is very quiet at night. Quiet enough to hear the rain, and to count every mistake.' },
+];
+[[PROLOGUE,'prologue'],[ACT_END,'act1_end'],[FALL,'fall']].forEach(([a,k]) => a.forEach((p,i) => p.id = 'cs_' + k + '_' + String(i+1).padStart(2,'0')));
+
+function playCutscene(panels, done, opts={}){
+  if (CS.active){ CS.queue.push([panels, done, opts]); return; }
+  CS.active = true; CS.panels = panels; CS.i = 0; CS.t = 0; CS.typed = 0; CS.done = done; CS.vignette = !!opts.vignette;
+  CS.wasSpeed = speed; setSpeed(0, true);
+  $('cs').hidden = false; $('csHint').textContent = CS.vignette ? 'Click to continue' : 'Click to continue · Esc to skip';
+  narratePanel(panels[0]);
+}
+function endCutscene(){
+  CS.active = false; $('cs').hidden = true; $('csCap').innerHTML = '';
+  try{ speechSynthesis.cancel(); }catch(e){} voStop();
+  const d = CS.done; CS.done = null;
+  if (CS.queue.length){ const q = CS.queue.shift(); playCutscene(q[0], q[1], q[2]); return; }
+  setSpeed(CS.wasSpeed || 1, true);
+  if (d) d();
+}
+function advanceCutscene(){
+  const p = CS.panels[CS.i];
+  if (CS.typed < p.text.length){ CS.typed = p.text.length; return; }
+  CS.i++; CS.t = 0; CS.typed = 0;
+  if (CS.i >= CS.panels.length) endCutscene(); else narratePanel(CS.panels[CS.i]);
+}
+function drawCutscene(dt){
+  const p = CS.panels[CS.i]; CS.t += dt;
+  const cv = $('csCanvas'), g = cv.getContext('2d'), w = cv.width, h = cv.height;
+  // Ken Burns
+  const k = Math.min(CS.t / p.dur, 1.3);
+  g.save(); g.setTransform(1,0,0,1,0,0); g.clearRect(0,0,w,h);
+  const z = 1.02 + k*.07; g.translate(w/2, h/2); g.scale(z,z); g.translate(-w/2 + (p.pan||1)*k*w*.012, -h/2);
+  ART[p.art](g, w, h, CS.t, p.arg);
+  g.restore();
+  // grain + vignette + letterbox
+  g.save(); g.globalAlpha = .09; g.globalCompositeOperation = 'overlay';
+  const pat = g.createPattern(grainCanvas, 'repeat'); g.translate(Math.random()*256, Math.random()*256); g.fillStyle = pat; g.fillRect(-256,-256,w+512,h+512); g.restore();
+  vignetteLayer(g, w, h, .9);
+  const lb = h*.08; g.fillStyle = '#000'; g.fillRect(0,0,w,lb); g.fillRect(0,h-lb,w,lb);
+  // fade in
+  if (CS.t < .6){ g.fillStyle = `rgba(0,0,0,${1 - CS.t/.6})`; g.fillRect(0,0,w,h); }
+  // typing
+  const before = Math.floor(CS.typed);
+  CS.typed = Math.min(p.text.length, CS.typed + dt*34);
+  if (Math.floor(CS.typed) > before && p.text[Math.floor(CS.typed)-1] !== ' ' && Math.random() < .7) sfx.key();
+  const shown = p.text.slice(0, Math.floor(CS.typed));
+  $('csCap').innerHTML = shown.replace(/&/g,'&amp;').replace(/</g,'&lt;') + (CS.typed < p.text.length ? '<span class="cursor"></span>' : '');
+  if (CS.typed >= p.text.length && CS.t > p.dur) advanceCutscene();
+}
+function vignette(kind, text, arg){
+  playCutscene([{ art:kind, dur:4.2, text, arg }], null, { vignette:true });
+}
+
+/* =========================================================================
+   NEWSPAPER
+   ========================================================================= */
+function showPaper(){
+  const wk = S.week, d = Math.floor(S.t/24), lvl = heatLevel();
+  const date = new Date(START_DATE + d*864e5).toLocaleDateString('en-GB',{ weekday:'long', day:'numeric', month:'long', year:'numeric', timeZone:'UTC' });
+  let ev = wk.events.sort((a,b)=>b.sev-a.sev)[0];
+  if (!ev){
+    ev = lvl >= 3 ? { head:'Task force vows to clean up Chow Kit', deck:'Federal officers arrive as gambling, liquor and loan-shark complaints pile up.' }
+       : lvl >= 2 ? { head:'Police step up patrols on Jalan Raja Bot', deck:'Residents report new faces running old businesses after dark.' }
+       : lvl >= 1 ? { head:'Chow Kit traders complain of protection money', deck:'Shopkeepers say two groups are now collecting on the same street.' }
+       : { head:'Wet week, quiet streets in Chow Kit', deck:'Rain keeps shoppers away from the Bazaar Baru; police report nothing unusual.' };
+  }
+  const sh = shares();
+  const net = wk.income - wk.wages;
+  const body1 = `KUALA LUMPUR — ${ev.deck} Sources close to the Dang Wangi police district describe a contest for Jalan Raja Bot between the established Geng Lorong and a newcomer the street calls only "the boss from Ipoh".`;
+  const body2 = sh.you > sh.riv ? `Shopkeepers say the newcomer now collects on more doors than Geng Lorong. "The red signs are winning," said one hawker, who asked not to be named.` : `Geng Lorong, led by a man known as Mat Botak, still controls most of the street, according to residents. "They were here first," said a trishaw rider. "They think that settles it."`;
+  $('paper').innerHTML = `<article class="news" role="dialog" aria-label="Weekly newspaper">
+    <div class="mast"><b>Warta Malam</b><small><span>Kuala Lumpur</span><span>${date}</span><span>20 sen</span></small></div>
+    <h2>${ev.head}</h2><p class="deck">${lvl >= 2 ? 'Police chief promises arrests "within weeks"' : 'Residents keep their shutters down and their mouths shut'}</p>
+    <div class="cols"><div><p>${body1}</p><p>${body2}</p></div>
+      <div class="ledger"><h5>Your ledger · week ${Math.round(d/7)}</h5><dl>
+        <dt>Takings</dt><dd>${fmt(wk.income)}</dd><dt>Wages & upkeep</dt><dd>−${fmt(wk.wages)}</dd>
+        <dt>Seized by police</dt><dd>−${fmt(wk.seized)}</dd><dt>Washed clean</dt><dd>${fmt(wk.laundered)}</dd>
+        <dt class="tot">Net</dt><dd class="tot">${fmt(net - wk.seized)}</dd>
+        <dt>Heat</dt><dd>${Math.round(wk.heat0)} → ${Math.round(S.heat)}</dd><dt>Turf</dt><dd>${Math.round(sh.you*100)}%</dd></dl></div></div>
+    <div class="foot"><button class="stampbtn" id="foldPaper">Fold the paper</button></div></article>`;
+  $('paper').hidden = false; sfx.paper();
+  const was = speed; setSpeed(0, true);
+  $('foldPaper').focus();
+  $('foldPaper').onclick = () => { $('paper').hidden = true; setSpeed(was || 1, true); sfx.click(); };
+  S.week = { income:0, wages:0, laundered:0, seized:0, heat0:S.heat, events:[] };
+}
+
+/* =========================================================================
+   FLOW
+   ========================================================================= */
+function applyLook(){ $('aLook').setAttribute('aria-pressed', LOOK.colour); $('aLookC').textContent = LOOK.colour ? 'colour' : 'noir'; }
+function showTip(){
+  const riv = S.lots.map((l,i)=>[l,i]).filter(([l]) => l.owner === 'rival');
+  if (!riv.length) return;
+  $('paper').innerHTML = `<article class="choice" role="dialog" aria-label="A note under the door">
+    <div class="kick">A note under the den door</div>
+    <h2>Geng Lorong isn't only moving liquor</h2>
+    <p>Ah Mui heard it from a lorry driver at Port Klang. Mat Botak's containers come in with people inside: girls from upcountry and across the Straits, promised factory jobs, kept in a shophouse on his side of the street.</p>
+    <p>It's his business. It could also be his ruin.</p>
+    <div class="opts">
+      <button class="stampbtn" id="tipYes">Phone the police from a kopitiam, and hang up before they ask your name<small>Geng Lorong loses a shophouse to the police. Their attention goes elsewhere: heat −12, respect +5.</small></button>
+      <button class="stampbtn" id="tipNo">Burn the note<small>Not your business. Nothing changes.</small></button>
+    </div></article>`;
+  $('paper').hidden = false; sfx.paper();
+  const was = speed; setSpeed(0, true);
+  const done = () => { $('paper').hidden = true; setSpeed(was || 1, true); };
+  $('tipYes').onclick = () => {
+    const [l,i] = pick(riv); l.owner = 'sale'; l.biz = null; l.price = Math.round(l.price*.8/100)*100;
+    news('tip', i); S.heat = clamp(S.heat - 12, 0, 100); S.respect = clamp(S.respect + 5, 0, 100); S.policeLot = i; S.policeUntil = S.t + 12;
+    log(`Police raided Geng Lorong at ${lotAddress(i)} and found what Ah Mui said they would. The lot is for sale.`, 'good');
+    weekEvent(5, 'Police free workers held in Chow Kit shophouse', 'Detectives link a local gang to a smuggling route through Port Klang; arrests expected.');
+    done(); vignette('raid', 'Some lines even I won\'t cross. One phone call, no name, and Mat Botak\'s week got a lot worse.');
+  };
+  $('tipNo').onclick = () => { log('You burned the note. Some nights you would rather not know.'); done(); };
+  $('tipYes').focus();
+}
+function setSpeed(v, silent){
+  speed = v; ['sp0','sp1','sp2','sp4'].forEach(id => $(id).setAttribute('aria-pressed', String(Number($(id).dataset.speed) === v)));
+  if (!silent) sfx.click();
+}
+function showGame(){
+  $('title').hidden = true; ['hud','goals','dock'].forEach(id => $(id).hidden = false);
+  updateHUD(); renderLog(); updateGoals();
+}
+function startNew(withPrologue){
+  if (G.pov) exitPOV();
+  S = newState(); selected = -1; (G.lots||[]).forEach(V => V.cur = undefined);
+  audioInit();
+  const begin = () => {
+    showGame(); setSpeed(1, true);
+    log('Tip: your mahjong den is the red-kerbed plot on Jalan Raja Bot. Click it and hire a second dealer.', 'good');
+    log('Geng Lorong holds the teal-kerbed plots. Grey kerbs are for sale.', '');
+    selectLot(9);
+  };
+  if (withPrologue) { $('title').hidden = true; playCutscene(PROLOGUE, begin); }
+  else begin();
+}
+function actComplete(){
+  playCutscene(ACT_END, () => log('Act I complete. The street is yours; keep playing as long as you like.', 'good'));
+}
+function fall(){
+  selected = -1; if (G.pov) exitPOV();
+  playCutscene(FALL, () => { try{ localStorage.removeItem('kotahitam.save'); }catch(e){} S = null; G.overlays.length = 0; $('title').hidden = false; ['hud','goals','dock','file'].forEach(id => $(id).hidden = true); $('btnContinue').hidden = true; });
+}
+
+/* ---------- save / restore ---------- */
+function autosave(){ try{ if (S && !S.flags.over) localStorage.setItem('kotahitam.save', JSON.stringify(S)); }catch(e){} }
+function loadSave(){ try{ const j = localStorage.getItem('kotahitam.save'); return j ? JSON.parse(j) : null; }catch(e){ return null; } }
+
+/* ---------- wiring ---------- */
+function wire(){
+  $('btnBegin').onclick = () => startNew(true);
+  $('btnSkip').onclick = () => startNew(false);
+  $('btnContinue').onclick = () => { const s = G.pendingSave || loadSave(); if (!s) return; S = s; audioInit(); (G.lots||[]).forEach(V => V.cur = undefined); showGame(); setSpeed(1,true); log('Back on Jalan Raja Bot.', ''); };
+  document.querySelectorAll('.speed button').forEach(b => b.onclick = () => setSpeed(Number(b.dataset.speed)));
+  $('aBribe').onclick = () => { const c = bribeCost(); if (S.dirty < c) return; S.dirty -= c; S.heat = clamp(S.heat - 15, 0, 100); S.bribeAt = S.t; log(`An envelope for the Dang Wangi station chief. ${fmt(c)}. Heat −15.`, 'good'); sfx.cash(); updateHUD(); };
+  $('aLow').onclick = () => { S.lieLow = !S.lieLow; log(S.lieLow ? 'Lying low: the back rooms stay dark and quiet.' : 'Back to business. The back rooms open again.'); sfx.click(); updateHUD(); };
+  $('aWash').onclick = () => {
+    const amt = Math.min(CHANGER_MAX, Math.floor(S.dirty)); if (!changerReady() || amt < 100) return;
+    S.dirty -= amt; S.clean += amt*CHANGER_RATE; S.washAt = S.t; S.heat = clamp(S.heat + 4, 0, 100); S.week.laundered += amt;
+    log(`A money changer in Masjid India swapped ${fmt(amt)} of dirty notes for ${fmt(amt*CHANGER_RATE)} clean. He'll remember your face. Heat +4.`, 'good');
+    sfx.cash(); updateHUD(); renderFile();
+  };
+  $('aMuscle').onclick = () => { if (S.dirty < 350 || S.muscle >= 6) return; S.dirty -= 350; S.muscle++; log(`Hired another enforcer. Muscle ${S.muscle}.`, 'good'); sfx.thud(); updateHUD(); renderFile(); };
+  $('aSit').onclick = () => { if (S.dirty < 1500) return; S.dirty -= 1500; S.sitAt = S.t; S.truceUntil = S.t + 72; S.respect = clamp(S.respect - 3, 0, 100); log('Sit-down at the Lake Gardens with Mat Botak. A three-day truce, paid in cash.', 'good'); sfx.cash(); updateHUD(); };
+  $('povExit').onclick = () => exitPOV();
+  $('povVoice').onclick = () => { VO.voiceOn = !VO.voiceOn; $('povVoice').textContent = 'Voice: ' + (VO.voiceOn ? 'on' : 'off'); $('povVoice').setAttribute('aria-pressed', VO.voiceOn); if (!VO.voiceOn){ voStop(); try{ speechSynthesis.cancel(); }catch(e){} } else if (G.pov) voiceBystander(G.pov.w, G.pov.text); };
+  $('aBooth').onclick = () => showBooth();
+  $('btnBooth').onclick = () => showBooth();
+  $('povNext').onclick = () => nextBystander();
+  $('aBag').onclick = () => { let tot = 0; S.lots.forEach((l,i) => { if (l.owner === 'you' && l.biz && (l.biz.till||0) > 0) tot += collect(i, .1); });
+    if (tot > 0){ log(`The bagman made his rounds. ${fmt(tot)} collected after his cut.`, 'good'); sfx.cash(); updateHUD(); renderFile(); } else log('The bagman found every till empty.'); };
+  $('aLook').onclick = () => { LOOK.colour = !LOOK.colour; applyLook(); try{ localStorage.setItem('kotahitam.look', LOOK.colour ? 'colour' : 'noir'); }catch(e){} sfx.click(); };
+  $('aSound').onclick = () => { A.on = !A.on; applyMute(); $('aSound').setAttribute('aria-pressed', A.on); $('aSoundC').textContent = A.on ? 'on' : 'off'; };
+  $('file').addEventListener('click', e => {
+    const b = e.target.closest('[data-a]'); if (!b || b.disabled) return;
+    const a = b.dataset.a;
+    if (a === 'closefile'){ selectLot(-1); return; }
+    if (a === 'buy') act('buy', selected);
+    else if (a === 'open') act('open', selected, b.dataset.k);
+    else if (a === 'price') act('price', selected, b.dataset.k);
+    else if (a === 'hire') act('hire', selected, b.dataset.k);
+    else if (a === 'fire') act('fire', selected, b.dataset.k);
+    else act(a, selected);
+  });
+  $('cs').addEventListener('click', e => { if (e.target.closest('#csBar')) return; advanceCutscene(); });
+  $('csSkip').onclick = e => { e.stopPropagation(); endCutscene(); };
+  $('csVoice').onclick = e => { e.stopPropagation(); narrate = !narrate; $('csVoice').textContent = 'Narrator: ' + (narrate ? 'on' : 'off'); $('csVoice').setAttribute('aria-pressed', narrate); if (narrate && CS.panels) narratePanel(CS.panels[CS.i]); else try{ speechSynthesis.cancel(); }catch(err){} };
+  addEventListener('keydown', e => {
+    if (CS.active){ if (e.key === 'Escape') endCutscene(); else if (e.key === ' ' || e.key === 'Enter'){ e.preventDefault(); advanceCutscene(); } return; }
+    if (!S || !$('paper').hidden || !$('title').hidden) return;
+    if (e.key === ' '){ e.preventDefault(); setSpeed(speed === 0 ? (prevSpeed || 1) : (prevSpeed = speed, 0)); }
+    else if (e.key === '1') setSpeed(1); else if (e.key === '2') setSpeed(2); else if (e.key === '3') setSpeed(4);
+    else if (e.key === 'Escape'){ if (G.pov) exitPOV(); else selectLot(-1); }
+    else if ((e.key === 'n' || e.key === 'N') && G.pov) nextBystander();
+  });
+  document.addEventListener('visibilitychange', () => { if (document.hidden && A.ctx) A.ctx.suspend(); else if (A.ctx && !document.hidden) A.ctx.resume(); });
+}
+
+/* ---------- main loop ---------- */
+let last = performance.now(), hudAcc = 0;
+function frame(now){
+  const dt = Math.min(.05, (now - last)/1000); last = now;
+  const time = now/1000;
+  if (CS.active){ drawCutscene(dt); }
+  else {
+    if (G.overlays.length && S && $('paper').hidden) G.overlays.shift()();
+    if (S && speed > 0 && $('paper').hidden){ advance(dt * HOURS_PER_SEC * speed); }
+    hudAcc += dt; if (S && hudAcc > .2){ hudAcc = 0; updateHUD(); }
+  }
+  if (!CS.active && G.ok){
+    const keepS = S; if (!S) S = DEMO;
+    syncScene(time, dt, S.t + (keepS ? 0 : time*.02));
+    S = keepS;
+    renderFrame();
+  }
+  requestAnimationFrame(frame);
+}
+let DEMO = null;
+
+function start(data){
+  try { initGL(); G.ok = true; } catch(err){ G.ok = false; console.error('WebGL unavailable', err); addEventListener('resize', sizeCS); }
+  sizeCS(); wire(); voInit();
+  window.__kh = { get S(){ return S; }, selectLot, act, advance:h => advance(h), G, gen:(seed,o) => generateProfile(mulberry(seed), o||{}), think:composeThought, plotXZ, VO, blockVisible };
+  DEMO = newState(); DEMO.t = 22;
+  // give the title screen a lived-in street
+  const demo = (i, owner, type) => DEMO.lots[i] = { owner, biz:{ type, tier:1, price:'fair', staff:[{name:'x',trait:'honest',id:'d'+i}], closedUntil:0, undercutUntil:0, till:0 }, price:2400, burned:false };
+  demo(10,'you','bar'); demo(6,'you','front'); demo(1,'rival','casino'); demo(14,'you','parlour'); demo(3,'rival','chop'); demo(12,'you','ekor');
+  try{ LOOK.colour = localStorage.getItem('kotahitam.look') === 'colour'; }catch(e){}
+  applyLook();
+  const save = (data && data.save) || loadSave();
+  if (save && save.v === 2){ while (save.lots.length < LOT_COUNT) save.lots.push({ owner:'locked', biz:null, price:2200, burned:false }); save.blocks = []; save.v = 3; }
+  if (save && save.v === 3 && !save.flags.over){ G.pendingSave = save; $('btnContinue').hidden = false; $('btnBegin').textContent = 'New game'; }
+  requestAnimationFrame(frame);
+}
+if (window.claude && window.claude.hot && window.claude.hot.snapshot){ try{ window.claude.hot.snapshot(() => ({ save: S })); }catch(e){} }
+window.claude?.hot?.ready ? window.claude.hot.ready(start) : start(window.claude?.hot?.data ?? {});
+})();

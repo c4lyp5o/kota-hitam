@@ -4,13 +4,21 @@ Drives the game through the window.__kh debug hook and fails on any page error.
 It checks the simulation, economy, expansion, laundering escapes, NPC profiles and
 the thought engine. It does not check WebGL rendering.
 
+It runs against the production build in dist/, so build first; `npm test` does both.
+
     pip install playwright && playwright install chromium
-    python3 tests/smoke_test.py            # or CHROME=/path/to/chrome python3 tests/smoke_test.py
+    npm test            # or CHROME=/path/to/chrome npm test
 """
-import asyncio, os, pathlib, sys
+import asyncio, functools, http.server, os, pathlib, sys, threading
 from playwright.async_api import async_playwright
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+DIST = ROOT / 'dist'
+
+class QuietHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
 CHECKS = r"""() => {
   const k = window.__kh, S = k.S, fail = [];
   const ok = (cond, msg) => { if (!cond) fail.push(msg); };
@@ -47,18 +55,24 @@ CHECKS = r"""() => {
 }"""
 
 async def main():
+    if not (DIST / 'index.html').exists():
+        sys.exit('dist/index.html not found: run `npm run build` first, or use `npm test`')
+    handler = functools.partial(QuietHandler, directory=str(DIST))
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
     async with async_playwright() as p:
         kw = {'executable_path': os.environ['CHROME']} if os.environ.get('CHROME') else {}
         browser = await p.chromium.launch(**kw)
         page = await browser.new_page(viewport={'width': 1280, 'height': 800})
         errors = []
         page.on('pageerror', lambda e: errors.append(str(e)))
-        await page.goto((ROOT / 'index.html').as_uri())
+        await page.goto(f'http://127.0.0.1:{server.server_address[1]}/')
         await page.wait_for_timeout(1500)
         await page.click('#btnSkip')
         await page.wait_for_timeout(500)
         result = await page.evaluate(CHECKS)
         await browser.close()
+    server.shutdown()
     problems = result['fail'] + [f'page error: {e}' for e in errors]
     print(f"after {result['t']} in-game hours: dirty RM {result['dirty']}, clean RM {result['clean']}, heat {result['heat']}")
     if problems:

@@ -711,7 +711,7 @@ function initGL(){
   // the playable plots
   G.hutMats = PASTEL.map(c => new THREE.MeshToonMaterial({ color:c, gradientMap:G.grad, map:G.facadeTex, emissive:0xffffff, emissiveMap:G.facadeLit, emissiveIntensity:.8 }));
   G.lots = []; for (let i=0;i<LOT_COUNT;i++) G.lots.push(makePlot(i, rand));
-  G.markers = BLOCKS.map(B => { const m = new THREE.Sprite(new THREE.SpriteMaterial({ map:G.plusTex, depthTest:false, transparent:true })); m.scale.set(2.4,2.4,1); m.position.set(B.c[0], 9, B.c[1]); m.renderOrder = 11; m.visible = false; scene.add(m); return m; });
+  G.markers = BLOCKS.map((B, b) => { const m = new THREE.Sprite(new THREE.SpriteMaterial({ map:G.plusTex, depthTest:false, transparent:true })); m.scale.set(2.4,2.4,1); m.position.set(B.c[0], 9, B.c[1]); m.renderOrder = 11; m.visible = false; m.userData.lot = 16 + b*4; scene.add(m); return m; });
   const preBackdrop = scene.children.length; makeBackdrop(rand); bake(scene, preBackdrop); G.towers.forEach(t => scene.add(t.g));
 
   // backdrop windows, instanced
@@ -762,21 +762,20 @@ function initGL(){
 function makePlot(i, rand){
   const { x, z } = plotXZ(i);
   const root = new THREE.Group(); root.position.set(x, .2, z); G.scene.add(root);
-  const ground = new THREE.Group(); root.add(ground);
+  const ground = new THREE.Group(); ground.userData.lot = i; root.add(ground);
   box(ground, 4.7, .12, 4.7, 0x8e8a7f, 0, .06, 0, 0);
   const curbMat = new THREE.MeshBasicMaterial({ color:0x55585e });
   [[0,2.32,4.84,.16],[0,-2.32,4.84,.16],[2.32,0,.16,4.84],[-2.32,0,.16,4.84]].forEach(([cx,cz,w,d]) => { const c = new THREE.Mesh(new THREE.BoxGeometry(w,.22,d), curbMat); c.position.set(cx,.11,cz); ground.add(c); });
   bake(ground);
   const glowMat = new THREE.MeshBasicMaterial({ map:G.glowTex, color:0x000000, transparent:true, blending:THREE.AdditiveBlending, depthWrite:false });
   const glow = new THREE.Mesh(new THREE.PlaneGeometry(7.5,7.5), glowMat); glow.rotation.x = -Math.PI/2; glow.position.y = .14; glow.visible = false; root.add(glow);
-  const bld = new THREE.Group(); root.add(bld);
+  const bld = new THREE.Group(); bld.userData.lot = i; root.add(bld);
   const poolMat = new THREE.MeshBasicMaterial({ map:G.glowTex, color:0x000000, transparent:true, blending:THREE.AdditiveBlending, depthWrite:false });
   const pool = new THREE.Mesh(new THREE.PlaneGeometry(4.6,3.6), poolMat); pool.rotation.x = -Math.PI/2; pool.position.set(.4,.17,1.9); pool.visible = false; root.add(pool);
-  const bubble = new THREE.Sprite(new THREE.SpriteMaterial({ map:G.bubbleTex, depthTest:false, transparent:true })); bubble.scale.set(1.6,1.6,1); bubble.visible = false; bubble.renderOrder = 10; root.add(bubble);
-  const pick = new THREE.Mesh(new THREE.BoxGeometry(5,9,5), new THREE.MeshBasicMaterial()); pick.visible = false; pick.position.y = 4.5; pick.userData.lot = i; root.add(pick);
+  const bubble = new THREE.Sprite(new THREE.SpriteMaterial({ map:G.bubbleTex, depthTest:false, transparent:true })); bubble.scale.set(1.6,1.6,1); bubble.visible = false; bubble.renderOrder = 10; bubble.userData.lot = i; root.add(bubble);
   const flagMat = new THREE.MeshBasicMaterial({ color:0x000000 });
   const doorMat = new THREE.MeshBasicMaterial({ color:0x000000 });
-  return { i, x, z, root, bld, curbMat, glow, pool, glowMat, poolMat, bubble, pick, flagMat, doorMat, cur:undefined, hutMat: G.hutMats[Math.floor(rand()*G.hutMats.length)],
+  return { i, x, z, root, ground, bld, curbMat, glow, pool, glowMat, poolMat, bubble, flagMat, doorMat, cur:undefined, hutMat: G.hutMats[Math.floor(rand()*G.hutMats.length)],
            color: PASTEL[Math.floor(rand()*PASTEL.length)], seed: rand()*100, flick: rand() < .3, signMats:[], lanterns:[], top:2.4, pop:1 };
 }
 
@@ -1429,7 +1428,17 @@ function initInput(){
   G.persp = new THREE.PerspectiveCamera(64, G.aspect || 1, .05, 220);
   let down = null, moved = false;
   const cast = (cx, cy) => { ndc.set(cx/innerWidth*2-1, -(cy/innerHeight)*2+1); ray.setFromCamera(ndc, G.pov ? G.persp : G.camera); };
-  const pickLot = () => { const hit = ray.intersectObjects(G.lots.filter(l => l.root.visible).map(l => l.pick), false)[0]; return hit ? hit.object.userData.lot : -1; };
+  // Tests what's drawn rather than a box around it, so a click lands on what's under the pointer.
+  // Markers and cash bubbles are drawn over everything, so they get the first say.
+  const pickLot = () => {
+    const lots = G.lots.filter(l => l.root.visible);
+    const hit = ray.intersectObjects(G.markers.filter(m => m.visible), false)[0]
+      || ray.intersectObjects(lots.filter(l => l.bubble.visible).map(l => l.bubble), false)[0]
+      || ray.intersectObjects(lots.flatMap(l => [l.ground, l.bld]), true).find(h => h.object.visible);
+    let o = hit && hit.object;
+    while (o && o.userData.lot === undefined) o = o.parent;
+    return o ? o.userData.lot : -1;
+  };
   const pickWalker = () => { const hit = ray.intersectObjects(G.walkers.filter(w => G.pov ? w !== G.pov.w : fogClearAt(w.g.position)).map(w => w.pick), false)[0]; return hit ? hit.object.userData.walker : null; };
   cv.addEventListener('pointerdown', e => { down = { x:e.clientX, y:e.clientY, tx:G.target.x, tz:G.target.z, look:G.pov ? G.pov.look : 0, pitch:G.pov ? G.pov.pitch : 0 }; moved = false; try{ cv.setPointerCapture(e.pointerId); }catch(err){} });
   cv.addEventListener('pointermove', e => {

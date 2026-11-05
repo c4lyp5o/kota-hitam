@@ -29,7 +29,7 @@ The original design doc lives in claude.ai as a shared doc and is the source of 
 ## Known issues and untested areas
 
 - **Frame rate:** on the owner's GPU it went from 45 to 60 fps once `bake()` merged plot buildings, plot bases and the backdrop by material, taking draw calls from about 1,750 to 1,190 per frame (counted under software WebGL). Frame rate with fog of war on hasn't been measured. About half of the remaining calls are NPCs (27 each), which rigged characters should fix (task 4).
-- **Fog of war checks:** the visibility rule is in the smoke test and the fog has been rendered under software WebGL. Real clicks on fogged blocks and turning fog off in POV haven't been tested.
+- **Fog of war checks:** the visibility rule is in the smoke test and the fog has been rendered under software WebGL. A pointer sweep confirmed fogged blocks can't be hovered. Turning fog off in POV hasn't been tested.
 - **Lightning is very bright.** A bolt blows most of the visible city out to white for a moment. It's existing behaviour and may be worth softening.
 - **Three.js is r187,** pinned in `package.json`. Colour management is off and the legacy point light falloff is patched into `ShaderChunk` at the top of the game script, so recheck that patch on any upgrade: it replaces an exact line and silently does nothing if the line changes.
 - **Tooling gaps:** `src/main.js` isn't type-checked or Prettier-formatted yet (task 1 deals with that as it splits the file). `npm audit` reports 10 moderate warnings, all from `minimatch` through the dev-only lint tools, and none reach the shipped game. Its suggested fix downgrades ESLint, so it hasn't been applied.

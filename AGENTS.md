@@ -4,7 +4,7 @@ Guidance for coding agents (Claude Code and others) working on Kota Hitam. Read 
 
 ## The project in one paragraph
 
-Kota Hitam is a noir racket tycoon set in Kuala Lumpur, 1987, played in the browser. Today it is a prototype built with Vite on Three.js r187 (from npm): markup and CSS in `index.html`, the simulation in TypeScript under `src/sim/`, and everything else in one script, `src/main.js`, about 2,300 lines of JavaScript that's being split into modules. The long-term plan is a TypeScript project with a shared simulation module that runs on both client and an authoritative game server, for a multiplayer version with realms and seasons alongside a story campaign and a sandbox mode.
+Kota Hitam is a noir racket tycoon set in Kuala Lumpur, 1987, played in the browser. Today it is a prototype built with Vite on Three.js r187 (from npm): markup and CSS in `index.html`, the simulation and bystanders in TypeScript under `src/sim/` and `src/npc/`, and everything else in one script, `src/main.js`, about 1,950 lines of JavaScript that's being split into modules. The long-term plan is a TypeScript project with a shared simulation module that runs on both client and an authoritative game server, for a multiplayer version with realms and seasons alongside a story campaign and a sandbox mode.
 
 ## Running and testing
 
@@ -30,7 +30,9 @@ Sections of `src/main.js` are marked with banner comments (`/* ===== NAME ===== 
 | `AUDIO` | WebAudio score: instruments, the 16-bar tune (`FORM`, `MEL`), scheduler, sound effects (`sfx`) |
 | `VOICE-OVERS` | Line IDs, recording-script export, IndexedDB storage, playback, the recording booth UI |
 | `WEBGL CITY` | Renderer, toon materials with ink outlines, static mesh merging (`bake`), plots (`makePlot`, `buildPlot`), backdrop, cars, police, fire, post-processing (noir grade, bloom, grain), fog of war (`fogCellOpen`, `fogTick`, `fogOver` in the composite shader), input, `syncScene()` |
-| `NPC FACTORY` | `createNPC(seed, overrides)` → `{ profile, rig }`, `generateProfile`, `buildRig`, walking and idle animation |
+| `src/npc/profile.ts` | `generateProfile`, and its data: `JOBS`, `TEMPERS`, `SECRETS`, names and clothing |
+| `src/npc/rig.ts` | `createNPC(seed, overrides)` → `{ profile, rig }`, `buildRig`, `makeWalkers`, walking and idle animation |
+| `src/render/materials.ts` | `G` (shared renderer state, loosely typed until the renderer moves), `toon`, `basic`, `ink` |
 | `bystander POV & inner voice` | `composeThought()`, secrets, `enterPOV`/`exitPOV`, `povTick()` |
 | `CUTSCENES` | Motion-comic renderer on a 2D canvas, panel art functions (`ART`), `PROLOGUE`, `ACT_END`, `FALL`, `vignette()` |
 | `NEWSPAPER` | Weekly *Warta Malam* front page |

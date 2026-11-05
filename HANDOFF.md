@@ -4,7 +4,7 @@
 
 ## Where things stand
 
-The prototype (`index.html`, the simulation in `src/sim/`, and everything else in `src/main.js`) plays the whole of Act I: a prologue cutscene, the Chow Kit economy, the Geng Lorong rival, heat and raids, expansion into 12 neighbourhoods, the end-of-Act-I and fall endings, a weekly newspaper, bystander POV with generated NPCs, fog of war over the city, and a recording booth for voice-overs. It runs on Three.js r187 and builds with Vite. The owner checked the 3D view on a real GPU before the move to Vite; since then it has only been rendered under software WebGL. The design is written up in `docs/DESIGN.md`.
+The prototype (`index.html`, the simulation in `src/sim/`, bystanders in `src/npc/`, and everything else in `src/main.js`) plays the whole of Act I: a prologue cutscene, the Chow Kit economy, the Geng Lorong rival, heat and raids, expansion into 12 neighbourhoods, the end-of-Act-I and fall endings, a weekly newspaper, bystander POV with generated NPCs, fog of war over the city, and a recording booth for voice-overs. It runs on Three.js r187 and builds with Vite. The owner checked the 3D view on a real GPU before the move to Vite; since then it has only been rendered under software WebGL. The design is written up in `docs/DESIGN.md`.
 
 The original design doc lives in claude.ai as a shared doc and is the source of truth for design discussion; `docs/DESIGN.md` is a condensed copy of it for this repo.
 
@@ -39,7 +39,7 @@ The original design doc lives in claude.ai as a shared doc and is the source of 
 
 ## Next tasks, in order
 
-1. **Split `src/main.js` into TypeScript modules:** `sim/` is done; next are `render/`, `npc/`, `pov/`, `audio/`, `vo/`, `cutscenes/`, `ui/`. Keep behaviour identical; the smoke test is the guard rail. Remove each file from `.prettierignore` as it's split, and turn on type checking.
+1. **Split `src/main.js` into TypeScript modules:** `sim/` and `npc/` are done; next are `render/`, `pov/`, `audio/`, `vo/`, `cutscenes/`, `ui/`. Keep behaviour identical; the smoke test is the guard rail. Remove each file from `.prettierignore` as it's split, and turn on type checking.
 2. **Make the simulation deterministic and serialisable:** seeded RNG passed in (not `Math.random`), a pure `tick(state, hours)` and `apply(state, action)`. This is what the multiplayer server will run.
 3. **Load voice-overs from `assets/vo/`** using the manifest the recording booth exports, falling back to the booth's browser storage during development.
 4. **Swap procedural NPC bodies for rigged GLTF characters,** keeping `createNPC`'s profile data and API.
@@ -52,6 +52,6 @@ The original design doc lives in claude.ai as a shared doc and is the source of 
 These are in `src/main.js` unless a path is given.
 
 - New economy rules: `BIZ` in `src/sim/data.ts`, then `hourTick()` and `act()` in `src/sim/simulation.ts`.
-- New bystander lines: `JOBS`, `TEMPERS`, `TYPE_LINES`, `NEWS_LINES` and friends; `composeThought()` decides what gets said.
+- New bystander lines: `JOBS` and `TEMPERS` in `src/npc/profile.ts`, `TYPE_LINES`, `NEWS_LINES` and friends; `composeThought()` decides what gets said.
 - New cutscenes: add panels to an array like `PROLOGUE` and an art function to `ART`; give each panel an `id` for voice-over.
 - New story beats with choices: copy `showTip()` and queue it with `G.overlays.push(...)`.

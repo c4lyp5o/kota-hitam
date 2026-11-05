@@ -1,5 +1,9 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { BIZ, BIZ_ORDER, BLOCKS, GROUPS, HEAT_LEVELS, HOURS_PER_SEC, LOT_COUNT, PRICE, START_DATE, TRAITS, WIN_LOTS, blockOf, lotAddress } from './sim/data';
+import { setPorts } from './sim/ports';
+import { CHANGER_MAX, CHANGER_RATE, act, advance, changerReady, collect, hasFront, log, payPlan, weekEvent } from './sim/simulation';
+import { S, blockAdjacent, blockVisible, canCollect, clamp, estDaily, expandCost, expandRespect, fmt, heatLevel, isClosed, newState, ownedCount, phaseOf, pick, rnd, setS, shares, slotsOf, staffEff, tillCap, unlockedCenters } from './sim/state';
 // Colours and the noir grade were tuned in gamma space, without colour management.
 THREE.ColorManagement.enabled = false;
 // Three dropped its legacy lights in r155. Light values here are in the old units, so scale them by pi
@@ -10,440 +14,12 @@ THREE.ShaderChunk.lights_pars_begin = THREE.ShaderChunk.lights_pars_begin.replac
   'return pow( saturate( 1.0 - lightDistance / cutoffDistance ), decayExponent ); float distanceFalloff = 1.0;');
 (() => {
 'use strict';
-/* =========================================================================
-   DATA
-   ========================================================================= */
-const HOURS_PER_SEC = 24 / 30;            // one in-game day = 30 s at 1×
-const START_DATE = Date.UTC(1987, 10, 2); // Monday 2 Nov 1987
-
-const BIZ = {
-  bola:   { name:'Bola betting shop',     group:'street', vice:true,  cost:900,  money:'dirty', perDay:520,  heat:2,   slots:1, day:.9,  night:1.2, color:0x2bff6a, css:'#1f9d48', vert:'BOLA', horiz:'BOLA · SPORTS CLUB', blurb:'Football odds and runners. Cheap and quiet.' },
-  ekor:   { name:'Ekor numbers',          group:'street', vice:true,  cost:700,  money:'dirty', perDay:380,  heat:1.5, slots:1, day:1.1, night:.9,  color:0xf2ff3a, css:'#a9b01c', vert:'萬字', horiz:'4D · EKOR', blurb:'Illegal four-digit lottery. Small bets, lots of them.' },
-  smokes: { name:'Contraband cigarettes', group:'street', vice:true,  cost:800,  money:'dirty', perDay:460,  heat:1.5, slots:1, day:1.1, night:.9,  color:0xff6420, css:'#c4511c', vert:'香煙', horiz:'ROKOK MURAH', blurb:'Duty-free cartons off the Thai border run.' },
-  fakes:  { name:'Counterfeit stall',     group:'street', vice:true,  cost:1000, money:'dirty', perDay:540,  heat:1.5, slots:1, day:1.3, night:.6,  color:0x9b5cff, css:'#6f45c2', vert:'名牌', horiz:'JAM · BEG · KASET', blurb:'Fake watches, handbags and pirated cassettes.' },
-  den:    { name:'Mahjong den',           group:'back',   vice:true,  cost:1200, money:'dirty', perDay:700,  heat:2.5, slots:2, day:.5,  night:1.5, color:0xff2238, css:'#d81d33', vert:'麻將', horiz:'麻將 · MAHJONG', blurb:'Tiles click till dawn. Steady money.' },
-  ahlong: { name:'Ah Long office',        group:'back',   vice:true,  cost:1500, money:'dirty', perDay:820,  heat:3,   slots:2, day:1.25,night:.7,  color:0xffb000, css:'#c98a0c', vert:'借錢', horiz:'PINJAMAN WANG', blurb:'Loans at 20% a week. Collections by day.' },
-  bar:    { name:'Back-room bar',         group:'back',   vice:true,  cost:1800, money:'dirty', perDay:1000, heat:3.5, slots:2, day:.4,  night:1.6, color:0x2f8dff, css:'#2468c9', vert:'酒', horiz:'BAR · ARAK · BIR', blurb:'Smuggled liquor off the Port Klang lorries.' },
-  parlour:{ name:'Massage parlour',       group:'back',   vice:true,  cost:2600, money:'dirty', perDay:1400, heat:5,   slots:3, day:.5,  night:1.5, color:0xff79c6, css:'#c2508f', vert:'按摩', horiz:'URUT · MASSAGE', blurb:'Hostesses upstairs and a madam downstairs who keeps the books.', respect:20 },
-  chop:   { name:'Chop shop',             group:'big',    vice:true,  cost:2200, money:'dirty', perDay:1150, heat:4,   slots:2, day:1.2, night:.8,  color:0xb6ff2a, css:'#6f9c16', vert:'車行', horiz:'BENGKEL · KERETA', blurb:'Stolen cars in, numbered parts out by morning.', respect:15 },
-  powder: { name:'Powder room',           group:'big',    vice:true,  cost:3000, money:'dirty', perDay:2000, heat:8,   slots:2, day:.6,  night:1.4, color:0xff2fd0, css:'#b51d93', vert:'藥材', horiz:'KEDAI UBAT', blurb:'A herbal shop in front. Something worse in back.', respect:25 },
-  casino: { name:'Gambling hall',         group:'big',    vice:true,  cost:4500, money:'dirty', perDay:2700, heat:6,   slots:3, day:.4,  night:1.6, color:0xffcf40, css:'#b8902a', vert:'賭場', horiz:'KELAB · CASINO', blurb:'Baccarat tables and a cashier cage. High rollers only.', respect:40 },
-  front:  { name:'Kopitiam front',        group:'front',  vice:false, cost:1200, money:'clean', perDay:180,  heat:-2,  slots:1, day:1.4, night:.5,  color:0xfff1cf, css:'#9a927f', vert:'茶室', horiz:'KOPITIAM', blurb:'Washes RM 900 of dirty cash a day at 80%.', launder:900, rate:.8 },
-  laundry:{ name:'Laundromat front',      group:'front',  vice:false, cost:3000, money:'clean', perDay:250,  heat:-3,  slots:1, day:1.3, night:.6,  color:0xbfe9ff, css:'#5f8ea3', vert:'洗衣', horiz:'DOBI · LAUNDRY', blurb:'Washes RM 1,800 a day at 85%. A laundry that launders.', launder:1800, rate:.85, respect:30 },
-};
-const BIZ_ORDER = Object.keys(BIZ);
-const GROUPS = [['street','Street rackets'],['back','Back rooms'],['big','Big money'],['front','Fronts']];
-const RIVAL_TYPES = ['bola','den','bar','ahlong','ekor','smokes','fakes','parlour'];
-
-const TRAITS = {
-  honest: { label:'Honest',          wage:60, note:'Steady. No surprises.' },
-  sharp:  { label:'Sharp',           wage:95, note:'+25% takings.' },
-  sticky: { label:'Sticky-fingered', wage:40, note:'Skims a quarter of the till.' },
-  talker: { label:'Talkative',       wage:50, note:'+60% heat from this place.' },
-  tough:  { label:'Tough',           wage:80, note:'Stops sabotage and arson here.' },
-};
-const NAMES = ['Ah Keong','Siti Aminah','Ravi','Ah Mui','Faizal','Kumar','Mei Ling','Zul','Ah Pang','Devi','Lim Kok Wah','Rosli','Selvam','Ah Beng','Nora','Jamal','Kavitha','Tan Ah Huat','Azman','Wei Jie','Priya','Hafiz','Ah Choy','Murugan','Salmah','Chin Fatt','Ganesh','Yati'];
-
-const HEAT_LEVELS = ['Whispers','Patrols','Raids','Task force','Crackdown'];
-const PRICE = { cheap:{label:'Cheap',inc:.8,share:1.25}, fair:{label:'Fair',inc:1,share:1}, steep:{label:'Steep',inc:1.25,share:.8} };
-
-const BLOCKS = [
-  { c:[-21,-21], name:'Sentul',            blurb:'Railway yards and warehouses. Anything that comes by lorry ends up here.' },
-  { c:[-7,-21],  name:'Titiwangsa',        blurb:'Lake Gardens on one side, quiet money on the other.' },
-  { c:[7,-21],   name:'Jalan Pahang',      blurb:'Hospital traffic day and night, and doctors with gambling debts.' },
-  { c:[21,-21],  name:'Kampung Baru North',blurb:'Wooden village houses and a night market that never sleeps.' },
-  { c:[-21,-7],  name:'Jalan Ipoh',        blurb:'Bus depots and mechanics. Cars go missing here.' },
-  { c:[21,-7],   name:'Kampung Baru',      blurb:'Satay stalls, old families and long memories.' },
-  { c:[-21,7],   name:'Jalan TAR',         blurb:'Cloth shops by day, cabarets by night.' },
-  { c:[21,7],    name:'Jalan Raja Muda',   blurb:'Government quarters. Clerks with expensive habits.' },
-  { c:[-21,21],  name:'Masjid India',      blurb:'Textile merchants and money changers who ask no questions.' },
-  { c:[-7,21],   name:'Dang Wangi',        blurb:'The police district headquarters is two streets away. Bold.' },
-  { c:[7,21],    name:'Jalan Ampang',      blurb:'Embassy cars and bankers who like a quiet card game.' },
-  { c:[21,21],   name:'Bukit Bintang',     blurb:'Where the real money drinks. Mat Botak\'s bosses have friends here.' },
-];
-const CORE_BLOCKS = [[-7,-7],[7,-7],[-7,7],[7,7]];
-const LOT_COUNT = 16 + BLOCKS.length*4;
-function blockOf(i){ return i < 16 ? -1 : Math.floor((i-16)/4); }
-function unlockedCenters(){ return CORE_BLOCKS.concat((S.blocks||[]).map(b => BLOCKS[b].c)); }
-function blockAdjacent(b){ const [x,z] = BLOCKS[b].c; return unlockedCenters().some(([ux,uz]) => Math.abs(ux-x) + Math.abs(uz-z) === 14); }
-function blockVisible(b){ return (S.blocks||[]).includes(b) || blockAdjacent(b); }
-function expandCost(){ return Math.round((6000 + 3000*(S.blocks||[]).length) * (S.discount || 1) / 100)*100; }
-function expandRespect(){ return 15 + 5*(S.blocks||[]).length; }
-function lotAddress(i){
-  if (i >= 16){ const b = blockOf(i); return `Plot ${(i-16)%4 + 1}, ${BLOCKS[b].name}`; }
-  const r = Math.floor(i/4), c = i%4;
-  return [`No. ${c*2+1}, Jalan Raja Alang`, `No. ${c*2+1}, Jalan Raja Bot`, `No. ${c*2+2}, Jalan Raja Bot`, `No. ${c*2+2}, Lorong Haji Taib`][r];
-}
-const WIN_LOTS = 10;
-
-/* =========================================================================
-   STATE
-   ========================================================================= */
-let S = null;
 let speed = 1, prevSpeed = 1;
 let selected = -1;
 
-function rnd(a,b){ return a + Math.random()*(b-a); }
-function pick(a){ return a[Math.floor(Math.random()*a.length)]; }
-function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
-function fmt(n){ return 'RM ' + Math.round(n).toLocaleString('en-US'); }
-
-function newCandidate(){
-  const trait = pick(['honest','honest','sharp','sticky','talker','tough','tough','sharp']);
-  return { name: pick(NAMES), trait, id: Math.random().toString(36).slice(2,8) };
-}
-function newState(){
-  const lots = [];
-  for (let i=0;i<LOT_COUNT;i++) lots.push({ owner: i < 16 ? 'sale' : 'locked', biz:null, price: 2000 + Math.round(Math.random()*7)*200, burned:false });
-  lots[9] = { owner:'you', biz:{ type:'den', tier:1, price:'fair', staff:[{name:'Ah Keong',trait:'honest',id:'k0'}], closedUntil:0, undercutUntil:0, till:120 }, price:2400, burned:false };
-  const rivalSet = { 2:'bola', 5:'bar', 7:'ahlong', 11:'den', 13:'smokes', 15:'parlour' };
-  for (const k in rivalSet) lots[k] = { owner:'rival', biz:{ type:rivalSet[k], tier:1, price:'fair', staff:[], closedUntil:0, undercutUntil:0, till:0 }, price:2600, burned:false };
-  return {
-    v:3, t:20, dirty:2400, clean:4200, respect:15, muscle:1, heat:10,
-    lieLow:false, bribeAt:-99, sitAt:-999, truceUntil:0,
-    lots, blocks:[], rival:{ cash:1500, muscle:3, nextMove:44 },
-    board:[newCandidate(),newCandidate(),newCandidate(),newCandidate()],
-    log:[], week:{ income:0, wages:0, laundered:0, seized:0, heat0:10, events:[] },
-    flags:{ firstOpen:false, firstTake:false, actDone:false, over:false, tip:false }, policeLot:-1, policeUntil:0,
-    fires:[],
-  };
-}
-
-/* ---------- derived ---------- */
-function isClosed(b){ return b.closedUntil > S.t; }
-function tillCap(b){ return BIZ[b.type].perDay * 1.5 * (1 + (b.tier-1)*.5); }
-function canCollect(i){ const l = S && S.lots[i]; return !!(l && l.owner === 'you' && l.biz && (l.biz.till||0) >= Math.max(40, tillCap(l.biz)*.12)); }
-function collect(i, fee){
-  const l = S.lots[i], b = l.biz, amt = (b.till||0) * (1 - (fee||0)); if (amt <= 0) return 0;
-  if (BIZ[b.type].money === 'clean') S.clean += amt; else S.dirty += amt;
-  b.till = 0;
-  if (!fee){ floatText(i, '+' + fmt(amt) + (BIZ[b.type].money === 'clean' ? ' clean' : '')); sfx.cash(); updateHUD(); renderFile(); }
-  return amt;
-}
 function floatText(i, text){
   const p = screenOf(i), el = document.createElement('div'); el.className = 'pop'; el.textContent = text;
   el.style.left = p.x + 'px'; el.style.top = p.y + 'px'; document.body.appendChild(el); setTimeout(() => el.remove(), 1300);
-}
-function staffEff(b){
-  const def = BIZ[b.type], slots = def.slots + (b.tier-1);
-  let eff = 0; for (const s of b.staff) eff += s.trait === 'sharp' ? 1.25 : 1;
-  return Math.min(eff, slots*1.25) / slots;
-}
-function slotsOf(b){ return BIZ[b.type].slots + (b.tier-1); }
-function phaseOf(h){ return (h >= 6 && h < 9) ? 'morning' : (h >= 9 && h < 18) ? 'day' : (h >= 18 && h < 21) ? 'dusk' : 'night'; }
-function phaseMult(def, h){ const p = phaseOf(h); return (p === 'night' || p === 'dusk') ? def.night : def.day; }
-function lotScore(l, who){
-  if (!l.biz) return 0;
-  let s = 1 + (l.biz.tier-1)*0.5;
-  if (isClosed(l.biz)) s *= .5;
-  if (who === 'you') s *= PRICE[l.biz.price].share;
-  return s;
-}
-function shares(){
-  let y=0, r=0, n=0;
-  for (const l of S.lots){
-    if (l.owner === 'you') y += l.biz ? lotScore(l,'you') : .35;
-    else if (l.owner === 'rival') r += lotScore(l,'rival');
-    else if (l.owner === 'sale') n += .45;
-  }
-  y *= (0.8 + S.respect/250);
-  const tot = y + r + n || 1;
-  return { you:y/tot, riv:r/tot, open:n/tot };
-}
-function ownedCount(){ return S.lots.filter(l => l.owner === 'you').length; }
-function heatLevel(){ return clamp(Math.floor(S.heat/20), 0, 4); }
-function bizIncomeHour(l, h, sh){
-  const b = l.biz, def = BIZ[b.type];
-  if (isClosed(b) || !b.staff.length) return 0;
-  let inc = def.perDay/24 * phaseMult(def,h) * staffEff(b) * PRICE[b.price].inc * (1 + (b.tier-1)*0.5) * (0.55 + 0.9*sh);
-  if (b.undercutUntil > S.t) inc *= .6;
-  if (def.vice && S.lieLow) inc *= .3;
-  const sticky = b.staff.filter(s => s.trait === 'sticky').length;
-  inc *= (1 - 0.25*sticky/slotsOf(b));
-  return inc;
-}
-function bizHeatHour(l){
-  const b = l.biz, def = BIZ[b.type];
-  if (isClosed(b) || !b.staff.length) return 0;
-  let h = def.heat/24 * (1 + (b.tier-1)*0.3);
-  if (h > 0){
-    const talk = b.staff.filter(s => s.trait === 'talker').length;
-    h *= 1 + 0.6*talk;
-    if (S.lieLow) h *= .3;
-  }
-  return h;
-}
-function estDaily(l){
-  const sh = shares().you; let inc=0, heat=0;
-  for (let h=0;h<24;h++){ inc += bizIncomeHour(l,h,sh); heat += bizHeatHour(l); }
-  return { inc, heat };
-}
-
-/* ---------- log ---------- */
-function stamp(){ const d = Math.floor(S.t/24), h = Math.floor(S.t%24); return `D${d+1} ${String(h).padStart(2,'0')}:00`; }
-function log(text, kind=''){
-  S.log.unshift({ t:stamp(), text, kind });
-  S.log.length = Math.min(S.log.length, 30);
-  renderLog();
-}
-function weekEvent(sev, head, deck){ S.week.events.push({ sev, head, deck }); }
-
-/* =========================================================================
-   SIMULATION
-   ========================================================================= */
-function advance(hours){
-  const target = S.t + hours;
-  while (Math.floor(S.t) < Math.floor(target)){
-    S.t = Math.floor(S.t) + 1;
-    hourTick();
-    if (S.flags.over) return;
-  }
-  S.t = target;
-}
-
-function hourTick(){
-  const h = S.t % 24, sh = shares().you;
-  let heatDelta = -(S.lieLow ? 6 : 1.5) / 24;
-  for (const l of S.lots){
-    if (l.owner !== 'you' || !l.biz) continue;
-    const def = BIZ[l.biz.type];
-    const cap = tillCap(l.biz), inc = Math.min(bizIncomeHour(l, h, sh), Math.max(0, cap - (l.biz.till||0)));
-    l.biz.till = (l.biz.till || 0) + inc;
-    S.week.income += inc;
-    heatDelta += bizHeatHour(l);
-    if (def.launder && !isClosed(l.biz) && l.biz.staff.length){
-      const amt = Math.min(Math.max(S.dirty,0), def.launder/24 * staffEff(l.biz) * (1 + (l.biz.tier-1)*0.5));
-      S.dirty -= amt; S.clean += amt*def.rate; S.week.laundered += amt;
-    }
-  }
-  S.heat = clamp(S.heat + heatDelta, 0, 100);
-
-  // rival income
-  S.rival.cash += S.lots.filter(l => l.owner === 'rival' && l.biz && !isClosed(l.biz)).length * 14;
-
-  // raids
-  if (S.heat >= 40){
-    const p = (S.heat - 35) / 1500 * (S.heat >= 80 ? 1.8 : 1);
-    if (Math.random() < p) raid();
-  }
-  // fires burn out
-  S.fires = S.fires.filter(f => f.until > S.t);
-  if (S.policeUntil < S.t) S.policeLot = -1;
-
-  if (h === 0) dayEnd();
-  if (h === 6 && Math.floor(S.t/24) % 7 === 0 && S.t > 24) G.overlays.push(showPaper);
-  if (h === 6) { S.board = [newCandidate(),newCandidate(),newCandidate(),newCandidate()]; }
-
-  if (S.t >= S.rival.nextMove) rivalMove();
-  if (!S.flags.tip && S.t > 24*5 && S.lots.some(l => l.owner === 'rival') && Math.random() < .015){ S.flags.tip = true; G.overlays.push(showTip); }
-
-  if (S.heat >= 100 && !S.flags.over){ S.flags.over = true; fall(); return; }
-  if (ownedCount() >= WIN_LOTS && !S.flags.actDone){ S.flags.actDone = true; actComplete(); }
-  if (selected >= 0) renderFile();
-  updateGoals();
-}
-
-const DIRTY_MARKUP = 1.6, CHANGER_MAX = 1500, CHANGER_RATE = .6;
-function hasFront(){ return S.lots.some(l => l.owner === 'you' && l.biz && BIZ[l.biz.type].launder); }
-// how a business gets paid for: clean money normally; a front can also be built with dirty cash, at a markup
-function payPlan(def, rebuild){
-  if (def.money !== 'clean') return { kind:'dirty', amt:def.cost + rebuild, ok:S.dirty >= def.cost + rebuild };
-  const c = def.cost + rebuild, d = Math.round((def.cost*DIRTY_MARKUP + rebuild)/100)*100;
-  if (S.clean >= c) return { kind:'clean', amt:c, ok:true, alt:d };
-  return { kind:'dirty', amt:d, ok:S.dirty >= d, cleanAmt:c, markup:true };
-}
-function changerReady(){ return S.t - (S.washAt == null ? -99 : S.washAt) >= 12; }
-function dayEnd(){
-  let wages = 0, upkeep = 0;
-  for (const l of S.lots){
-    if (l.owner !== 'you' || !l.biz) continue;
-    upkeep += 40;
-    for (const s of l.biz.staff) wages += TRAITS[s.trait].wage;
-  }
-  wages += S.muscle * 80;
-  const total = wages + upkeep;
-  S.dirty -= total; S.week.wages += total;
-  if (S.dirty < 0){
-    const all = []; S.lots.forEach(l => { if (l.owner==='you' && l.biz) l.biz.staff.forEach(s => all.push([l,s])); });
-    if (all.length){
-      const [l,s] = pick(all); l.biz.staff = l.biz.staff.filter(x => x !== s);
-      S.respect = clamp(S.respect - 5, 0, 100);
-      log(`Payroll came up short. ${s.name} walked out of ${BIZ[l.biz.type].name.toLowerCase()} for good.`, 'bad');
-    } else if (S.muscle > 0){ S.muscle--; log('Payroll came up short. One of your enforcers quit.', 'bad'); }
-  }
-  if (!hasFront() && S.clean < BIZ.front.cost && !S.flags.washHint){
-    S.flags.washHint = true;
-    log('Tip: you have no laundering front and little clean cash. Use the money changer, or build a kopitiam with dirty cash at a markup.', 'good');
-  }
-  // respect drifts up with held turf
-  S.respect = clamp(S.respect + ownedCount()*0.4, 0, 100);
-  autosave();
-}
-
-function raid(){
-  const targets = S.lots.map((l,i)=>[l,i]).filter(([l]) => l.owner==='you' && l.biz && BIZ[l.biz.type].vice && !isClosed(l.biz));
-  if (!targets.length) return;
-  const [l,i] = pick(targets);
-  const seized = Math.round(Math.max(S.dirty,0)*.1 + (l.biz.till||0));
-  l.biz.till = 0;
-  l.biz.closedUntil = S.t + 48;
-  S.dirty -= seized; S.week.seized += seized;
-  S.heat = clamp(S.heat - 8, 0, 100);
-  S.respect = clamp(S.respect - 4, 0, 100);
-  S.policeLot = i; S.policeUntil = S.t + 10;
-  log(`POLICE RAID on your ${BIZ[l.biz.type].name.toLowerCase()} at ${lotAddress(i)}. ${fmt(seized)} seized, shut for two days.`, 'bad');
-  weekEvent(3, `Police raid ${BIZ[l.biz.type].name.toLowerCase()} in Chow Kit`, `Officers seize ${fmt(seized)} in cash at ${lotAddress(i)}; operators remain at large.`);
-  news('raid', i);
-  sfx.siren(); vignette('raid', 'Blue and red on wet tarmac. Somebody talked. Somebody always talks.');
-}
-
-function rivalMove(){
-  S.rival.nextMove = S.t + rnd(30, 50);
-  if (S.truceUntil > S.t) return;
-  const sh = shares();
-  const myBiz = S.lots.map((l,i)=>[l,i]).filter(([l]) => l.owner==='you' && l.biz);
-  const sale = S.lots.map((l,i)=>[l,i]).filter(([l]) => l.owner==='sale');
-  const opts = [];
-  if (sale.length && S.rival.cash > 1800) opts.push(['expand', 4]);
-  if (myBiz.length) opts.push(['undercut', 3], ['sabotage', 2]);
-  if (myBiz.some(([l]) => l.biz.staff.length)) opts.push(['poach', 2]);
-  if (S.t > 72 && myBiz.length >= 2 && sh.you > 0.28) opts.push(['torch', 1 + sh.you*6]);
-  if (!opts.length) return;
-  let r = Math.random() * opts.reduce((a,o)=>a+o[1],0), move = opts[0][0];
-  for (const o of opts){ if ((r -= o[1]) <= 0){ move = o[0]; break; } }
-  const toughAt = l => l.biz.staff.some(s => s.trait === 'tough');
-
-  if (move === 'expand'){
-    const [l,i] = pick(sale);
-    S.rival.cash -= Math.min(S.rival.cash, l.price);
-    l.owner = 'rival'; l.burned = false;
-    l.biz = { type: pick(RIVAL_TYPES), tier:1, price:'fair', staff:[], closedUntil:0, undercutUntil:0, till:0 };
-    news('rivalbought', i);
-    log(`Geng Lorong bought ${lotAddress(i)} and opened a ${BIZ[l.biz.type].name.toLowerCase()}.`, 'rival');
-  } else if (move === 'undercut'){
-    const [l] = myBiz.sort((a,b)=>BIZ[b[0].biz.type].perDay - BIZ[a[0].biz.type].perDay)[0];
-    l.biz.undercutUntil = S.t + 48;
-    log(`Mat Botak is undercutting your ${BIZ[l.biz.type].name.toLowerCase()}. Takings down 40% for two days.`, 'rival');
-  } else if (move === 'poach'){
-    const withStaff = myBiz.filter(([l]) => l.biz.staff.length);
-    const [l] = pick(withStaff);
-    if (Math.random() < 0.6 - S.respect/250){
-      const s = l.biz.staff.sort((a,b)=>(b.trait==='sharp')-(a.trait==='sharp'))[0];
-      l.biz.staff = l.biz.staff.filter(x => x !== s);
-      log(`${s.name} took Geng Lorong's money and left your ${BIZ[l.biz.type].name.toLowerCase()}.`, 'bad');
-      S.respect = clamp(S.respect - 2, 0, 100);
-    } else log(`Geng Lorong tried to buy off your staff. Nobody bit.`, 'good');
-  } else if (move === 'sabotage'){
-    const [l,i] = pick(myBiz);
-    if (toughAt(l) || Math.random() < 0.2 + S.muscle*0.05){ log(`Your people ran off Geng Lorong boys loitering at ${lotAddress(i)}.`, 'good'); S.respect = clamp(S.respect+1,0,100); }
-    else {
-      l.biz.closedUntil = Math.max(l.biz.closedUntil, S.t + 24); S.heat = clamp(S.heat + 8, 0, 100);
-      log(`Sabotage: someone tipped off the police and smashed up your ${BIZ[l.biz.type].name.toLowerCase()}. Shut for a day, heat +8.`, 'bad');
-    }
-  } else if (move === 'torch'){
-    const [l,i] = myBiz.sort((a,b)=>BIZ[b[0].biz.type].perDay - BIZ[a[0].biz.type].perDay)[0];
-    const chance = 0.5 - S.muscle*0.07 - (toughAt(l) ? 0.3 : 0);
-    if (Math.random() < chance){
-      const name = BIZ[l.biz.type].name;
-      l.biz = null; l.burned = true; S.respect = clamp(S.respect - 4, 0, 100);
-      S.fires.push({ lot:i, until:S.t + 8 });
-      log(`FIRE at ${lotAddress(i)}. Geng Lorong torched your ${name.toLowerCase()}. The lot is still yours.`, 'bad');
-      news('fire', i);
-      weekEvent(4, `Shophouse blaze on Jalan Raja Bot`, `Fire department suspects arson; neighbours speak of a gang feud.`);
-      sfx.fire(); vignette('fire', 'Petrol and a match. Mat Botak never was subtle.');
-    } else {
-      S.respect = clamp(S.respect + 3, 0, 100);
-      log(`Your boys caught two Geng Lorong runners with petrol cans behind ${lotAddress(i)}.`, 'good');
-    }
-  }
-}
-
-/* ---------- player actions ---------- */
-function act(kind, i, arg){
-  const l = i >= 0 ? S.lots[i] : null;
-  switch(kind){
-    case 'buy':
-      if (S.clean < l.price) return;
-      S.clean -= l.price; l.owner = 'you'; l.biz = null;
-      log(`You bought ${lotAddress(i)} for ${fmt(l.price)} clean.`, 'good'); sfx.cash(); news('bought', i);
-      break;
-    case 'open': {
-      const def = BIZ[arg], rebuild = l.burned ? 400 : 0;
-      if (def.respect && S.respect < def.respect) return;
-      const plan = payPlan(def, rebuild); if (!plan.ok) return;
-      if (plan.kind === 'clean') S.clean -= plan.amt; else S.dirty -= plan.amt;
-      if (plan.markup){ S.heat = clamp(S.heat + 3, 0, 100); log(`No clean money, so the contractor took ${fmt(plan.amt)} in dirty cash and asked no questions. Heat +3.`, ''); }
-      l.biz = { type:arg, tier:1, price:'fair', staff:[], closedUntil:0, undercutUntil:0, till:0 }; l.burned = false;
-      S.respect = clamp(S.respect + 2, 0, 100);
-      log(`Opened a ${def.name.toLowerCase()} at ${lotAddress(i)}. Hire staff to get it running.`, 'good'); sfx.cash();
-      if (!S.flags.firstOpen){ S.flags.firstOpen = true; vignette('open', 'Another door, another back room. The neon said open. The ledger said more.', i); }
-      break; }
-    case 'upgrade': {
-      const def = BIZ[l.biz.type], c = Math.round(def.cost*1.2);
-      if (def.money === 'clean' ? S.clean < c : S.dirty < c) return;
-      if (def.money === 'clean') S.clean -= c; else S.dirty -= c;
-      l.biz.tier = 2; log(`${def.name} at ${lotAddress(i)} expanded into the floor upstairs.`, 'good'); sfx.cash();
-      break; }
-    case 'price': l.biz.price = arg; break;
-    case 'hire': {
-      const c = S.board.find(x => x.id === arg); if (!c) return;
-      const fee = TRAITS[c.trait].wage*2; if (S.dirty < fee || l.biz.staff.length >= slotsOf(l.biz)) return;
-      S.dirty -= fee; l.biz.staff.push({ name:c.name, trait:c.trait, id:c.id });
-      S.board = S.board.filter(x => x !== c);
-      log(`${c.name} (${TRAITS[c.trait].label.toLowerCase()}) starts tonight at ${lotAddress(i)}.`); sfx.click();
-      break; }
-    case 'fire':
-      l.biz.staff = l.biz.staff.filter(s => s.id !== arg); sfx.click();
-      break;
-    case 'collect': collect(i); return;
-    case 'expand': {
-      const b = blockOf(i), cost = expandCost();
-      if (b < 0 || !blockAdjacent(b) || S.clean < cost || S.respect < expandRespect() || S.blocks.includes(b)) return;
-      S.clean -= cost; S.blocks.push(b); S.discount = 1; news('expand', i, BLOCKS[b].name);
-      for (let k=0;k<4;k++){ const L = S.lots[16 + b*4 + k]; L.owner = 'sale'; L.price = 1800 + Math.round(Math.random()*6)*200; }
-      log(`You paid the headman. ${BLOCKS[b].name} is open: four plots for sale.`, 'good');
-      weekEvent(2, `Shophouses in ${BLOCKS[b].name} change hands`, `A newcomer is buying up the street; long-time tenants say the offers were hard to refuse.`);
-      sfx.cash(); floatText(i, BLOCKS[b].name + ' is open');
-      if (G.ok){ G.camGoal = { x:BLOCKS[b].c[0], z:BLOCKS[b].c[1] }; }
-      break; }
-    case 'close':
-      log(`You shut the ${BIZ[l.biz.type].name.toLowerCase()} at ${lotAddress(i)}. The room is empty again.`);
-      l.biz = null; break;
-    case 'strong': {
-      if (S.dirty < 400 || S.muscle < 1) return;
-      S.dirty -= 400;
-      const ok = Math.random() < 0.5 + 0.08*S.muscle - 0.06*S.rival.muscle + S.respect/400;
-      if (ok){ news('strong', i); l.biz.closedUntil = S.t + 48; S.heat = clamp(S.heat+5,0,100); S.respect = clamp(S.respect+2,0,100);
-        log(`Your enforcers leaned on Geng Lorong's ${BIZ[l.biz.type].name.toLowerCase()}. Shut for two days.`, 'good'); sfx.thud(); }
-      else { S.heat = clamp(S.heat+6,0,100); S.respect = clamp(S.respect-3,0,100); if (Math.random()<.4 && S.muscle>0){ S.muscle--; log('The shakedown went wrong. One of your enforcers is in Pudu lock-up.', 'bad'); } else log('The shakedown went wrong. Geng Lorong stood their ground.', 'bad'); }
-      break; }
-    case 'torch': {
-      if (S.dirty < 900 || S.muscle < 2) return;
-      S.dirty -= 900;
-      const ok = Math.random() < 0.42 + 0.08*S.muscle - 0.05*S.rival.muscle;
-      if (ok){
-        const name = BIZ[l.biz.type].name;
-        l.owner = 'sale'; l.biz = null; l.burned = true; l.price = Math.round(l.price*0.7/100)*100;
-        S.heat = clamp(S.heat+14,0,100); S.respect = clamp(S.respect+5,0,100);
-        S.fires.push({ lot:i, until:S.t+8 });
-        log(`${lotAddress(i)} burned. Geng Lorong lost their ${name.toLowerCase()}. The lot is up for sale.`, 'good');
-        news('torch', i);
-        weekEvent(4, `Night fire guts Chow Kit ${name.toLowerCase()}`, `Witnesses saw men with jerry cans; police appeal for information.`);
-        sfx.fire(); vignette('fire', 'You don\'t argue with a man about his shop. You argue with the shop.');
-      } else {
-        S.heat = clamp(S.heat+10,0,100); S.respect = clamp(S.respect-4,0,100);
-        if (S.muscle>0) S.muscle--;
-        log('The torch job failed. Geng Lorong caught one of your men and sent him back without his teeth.', 'bad');
-      }
-      break; }
-    case 'buyout': {
-      const c = l.price*2; if (S.clean < c || S.respect < 45) return;
-      S.clean -= c; l.owner = 'you'; l.biz.staff = []; l.biz.closedUntil = 0; l.biz.till = 0; S.heat = clamp(S.heat+2,0,100);
-      log(`You made Geng Lorong an offer for ${lotAddress(i)}. They took it. It's yours, staff not included.`, 'good'); sfx.cash();
-      if (!S.flags.firstTake){ S.flags.firstTake = true; vignette('take', 'Money talks. Clean money talks in a nicer voice.', i); }
-      break; }
-  }
-  updateHUD(); renderFile(); updateGoals();
 }
 
 /* =========================================================================
@@ -2608,7 +2184,7 @@ function showGame(){
 }
 function startNew(withPrologue){
   if (G.pov) exitPOV();
-  S = newState(); selected = -1; (G.lots||[]).forEach(V => V.cur = undefined);
+  setS(newState()); selected = -1; (G.lots||[]).forEach(V => V.cur = undefined);
   audioInit();
   const begin = () => {
     showGame(); setSpeed(1, true);
@@ -2624,7 +2200,7 @@ function actComplete(){
 }
 function fall(){
   selected = -1; if (G.pov) exitPOV();
-  playCutscene(FALL, () => { try{ localStorage.removeItem('kotahitam.save'); }catch(e){} S = null; G.overlays.length = 0; $('title').hidden = false; ['hud','goals','dock','file'].forEach(id => $(id).hidden = true); $('btnContinue').hidden = true; });
+  playCutscene(FALL, () => { try{ localStorage.removeItem('kotahitam.save'); }catch(e){} setS(null); G.overlays.length = 0; $('title').hidden = false; ['hud','goals','dock','file'].forEach(id => $(id).hidden = true); $('btnContinue').hidden = true; });
 }
 
 /* ---------- save / restore ---------- */
@@ -2635,7 +2211,7 @@ function loadSave(){ try{ const j = localStorage.getItem('kotahitam.save'); retu
 function wire(){
   $('btnBegin').onclick = () => startNew(true);
   $('btnSkip').onclick = () => startNew(false);
-  $('btnContinue').onclick = () => { const s = G.pendingSave || loadSave(); if (!s) return; S = s; audioInit(); (G.lots||[]).forEach(V => V.cur = undefined); showGame(); setSpeed(1,true); log('Back on Jalan Raja Bot.', ''); };
+  $('btnContinue').onclick = () => { const s = G.pendingSave || loadSave(); if (!s) return; setS(s); audioInit(); (G.lots||[]).forEach(V => V.cur = undefined); showGame(); setSpeed(1,true); log('Back on Jalan Raja Bot.', ''); };
   document.querySelectorAll('.speed button').forEach(b => b.onclick = () => setSpeed(Number(b.dataset.speed)));
   $('aBribe').onclick = () => { const c = bribeCost(); if (S.dirty < c) return; S.dirty -= c; S.heat = clamp(S.heat - 15, 0, 100); S.bribeAt = S.t; log(`An envelope for the Dang Wangi station chief. ${fmt(c)}. Heat −15.`, 'good'); sfx.cash(); updateHUD(); };
   $('aLow').onclick = () => { S.lieLow = !S.lieLow; log(S.lieLow ? 'Lying low: the back rooms stay dark and quiet.' : 'Back to business. The back rooms open again.'); sfx.click(); updateHUD(); };
@@ -2693,9 +2269,9 @@ function frame(now){
     hudAcc += dt; if (S && hudAcc > .2){ hudAcc = 0; updateHUD(); }
   }
   if (!CS.active && G.ok){
-    const keepS = S; if (!S) S = DEMO;
+    const keepS = S; if (!S) setS(DEMO);
     syncScene(time, dt, S.t + (keepS ? 0 : time*.02));
-    S = keepS;
+    setS(keepS);
     renderFrame();
   }
   requestAnimationFrame(frame);
@@ -2717,6 +2293,13 @@ function start(data){
   if (save && save.v === 3 && !save.flags.over){ G.pendingSave = save; $('btnContinue').hidden = false; $('btnBegin').textContent = 'New game'; }
   requestAnimationFrame(frame);
 }
+setPorts({
+  sfx, floatText, updateHUD, renderFile, updateGoals, renderLog, news, vignette, fall, actComplete, autosave,
+  refreshFile: () => { if (selected >= 0) renderFile(); },
+  queuePaper: () => { G.overlays.push(showPaper); },
+  queueTip: () => { G.overlays.push(showTip); },
+  focusCamera: (x, z) => { if (G.ok){ G.camGoal = { x, z }; } },
+});
 if (window.claude && window.claude.hot && window.claude.hot.snapshot){ try{ window.claude.hot.snapshot(() => ({ save: S })); }catch(e){} }
 window.claude?.hot?.ready ? window.claude.hot.ready(start) : start(window.claude?.hot?.data ?? {});
 })();

@@ -4,7 +4,7 @@ Guidance for coding agents (Claude Code and others) working on Kota Hitam. Read 
 
 ## The project in one paragraph
 
-Kota Hitam is a noir racket tycoon set in Kuala Lumpur, 1987, played in the browser. Today it is a prototype built with Vite on Three.js r187 (from npm): markup and CSS in `index.html`, and the whole game in one script, `src/main.js`, about 2,700 lines of JavaScript. The long-term plan is a TypeScript project with a shared simulation module that runs on both client and an authoritative game server, for a multiplayer version with realms and seasons alongside a story campaign and a sandbox mode.
+Kota Hitam is a noir racket tycoon set in Kuala Lumpur, 1987, played in the browser. Today it is a prototype built with Vite on Three.js r187 (from npm): markup and CSS in `index.html`, the simulation in TypeScript under `src/sim/`, and everything else in one script, `src/main.js`, about 2,300 lines of JavaScript that's being split into modules. The long-term plan is a TypeScript project with a shared simulation module that runs on both client and an authoritative game server, for a multiplayer version with realms and seasons alongside a story campaign and a sandbox mode.
 
 ## Running and testing
 
@@ -22,10 +22,10 @@ Sections of `src/main.js` are marked with banner comments (`/* ===== NAME ===== 
 | Section | What lives there |
 | --- | --- |
 | `<style>` in `index.html` | All CSS. Single committed dark look; tokens on `:root` (`--ink`, `--bone`, `--paper`, `--blood` for the player, `--lorong` for the rival, `--sodium` for money) |
-| `DATA` | `BIZ` (13 businesses and their numbers), `GROUPS`, `RIVAL_TYPES`, `TRAITS`, `NAMES`, `HEAT_LEVELS`, `PRICE`, `BLOCKS` (12 expansion neighbourhoods), `blockAdjacent()`, `blockVisible()`, `lotAddress()` |
-| `STATE` | `newState()` (save format `v:3`, 64 lots), `S` is the live game state |
-| `SIMULATION` | `advance()`, `hourTick()`, `dayEnd()`, `raid()`, `rivalMove()`, tills (`tillCap`, `canCollect`, `collect`) |
-| `player actions` | `act(kind, lot, arg)`: buy, open, upgrade, price, hire, fire, close, strong-arm, torch, buyout, collect, expand |
+| `src/sim/data.ts` | `BIZ` (13 businesses and their numbers), `GROUPS`, `RIVAL_TYPES`, `TRAITS`, `NAMES`, `HEAT_LEVELS`, `PRICE`, `BLOCKS` (12 expansion neighbourhoods), `lotAddress()` |
+| `src/sim/state.ts` | State types, `newState()` (save format `v:3`, 64 lots), `S` is the live game state (replace it with `setS()`), `blockAdjacent()`, `blockVisible()`, income, heat and till formulas |
+| `src/sim/simulation.ts` | `advance()`, `hourTick()`, `dayEnd()`, `raid()`, `rivalMove()`, `collect()`, `log()`, and `act(kind, lot, arg)`: buy, open, upgrade, price, hire, fire, close, strong-arm, torch, buyout, collect, expand |
+| `src/sim/ports.ts` | Everything the simulation needs from the outside: sounds, UI redraws, cutscenes, saving. `setPorts()` is called near the end of `src/main.js` |
 | `HUD / UI` | `updateHUD()`, `renderFile()` (the case-file panel), goals, log |
 | `AUDIO` | WebAudio score: instruments, the 16-bar tune (`FORM`, `MEL`), scheduler, sound effects (`sfx`) |
 | `VOICE-OVERS` | Line IDs, recording-script export, IndexedDB storage, playback, the recording booth UI |
@@ -36,7 +36,7 @@ Sections of `src/main.js` are marked with banner comments (`/* ===== NAME ===== 
 | `NEWSPAPER` | Weekly *Warta Malam* front page |
 | `FLOW` / save / wiring / main loop | New game, act completion, fall, `localStorage` saves (`kotahitam.save`), event wiring, `frame()` |
 
-The simulation (`SIMULATION`, `player actions`, `STATE`) has no WebGL dependencies. Keep it that way: it is the piece that moves to a shared TypeScript module and then to the server.
+The simulation (`src/sim/`) has no WebGL or page dependencies, and ESLint rejects `three`, imports from outside the folder, and `document`, `window` or `localStorage` there. Keep it that way: it is the piece that moves to the server. If it needs something visible to happen, add a port.
 
 ## Conventions
 

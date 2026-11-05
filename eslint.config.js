@@ -19,5 +19,13 @@ export default tseslint.config(
     files: ['**/*.ts'],
     extends: [tseslint.configs.recommended],
   },
+  {
+    // The simulation moves to the server later, so it can't touch the page or the renderer.
+    files: ['src/sim/**'],
+    rules: {
+      'no-restricted-imports': ['error', { patterns: ['three', 'three/*', '../*'] }],
+      'no-restricted-globals': ['error', 'document', 'window', 'localStorage'],
+    },
+  },
   prettier,
 );
